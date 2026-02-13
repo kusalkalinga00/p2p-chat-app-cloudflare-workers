@@ -161,6 +161,27 @@ export class World extends DurableObject<Env> {
         break;
       }
 
+      // ── WebRTC signaling relay ────────────────────────────────────
+      // These messages are forwarded 1-to-1 between two users who
+      // have agreed to chat.  The World DO acts as a thin relay so
+      // we don't need a separate signaling server.
+
+      case "rtc-offer":
+      case "rtc-answer":
+      case "rtc-ice-candidate": {
+        const peer = this.findSocket(data.target);
+        if (peer) {
+          peer.send(
+            JSON.stringify({
+              type: data.type,
+              from: attachment.id,
+              payload: data.payload,
+            }),
+          );
+        }
+        break;
+      }
+
       default:
         this.broadcast({ ...data, from: attachment.id });
     }

@@ -1,6 +1,19 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { IslandWorld } from "./components/IslandWorld";
+import {
+  PrivateChat,
+  type ChatMessage,
+  type RtcStatus,
+} from "./components/PrivateChat";
+import {
+  OutgoingInvitationModal,
+  IncomingInvitationModal,
+} from "./components/InvitationModal";
 import { Wifi, WifiOff, Loader2 } from "lucide-react";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 interface User {
   id: string;
@@ -10,6 +23,13 @@ interface User {
   color: string;
   available: boolean;
 }
+
+type View = "world" | "chat";
+type OutgoingStatus = "idle" | "waiting" | "timeout" | "declined";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 /** Convert HSL (h: 0-360, s/l: 0-1) to a deterministic hex string. */
 function hslToHex(h: number, s: number, l: number): string {
@@ -26,28 +46,332 @@ function hslToHex(h: number, s: number, l: number): string {
   return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`;
 }
 
+function randomColor() {
+  return hslToHex(Math.random() * 360, 0.7, 0.6);
+}
+
+function randomPosition(): [number, number, number] {
+  return [(Math.random() - 0.5) * 8, 0.5, (Math.random() - 0.5) * 8];
+}
+
+const STUN_SERVERS: RTCConfiguration = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+  ],
+};
+
+const INVITATION_TIMEOUT_MS = 15_000;
+
+// ---------------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------------
+
 function App() {
+  // ── Connection state ──
   const [connected, setConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [users, setUsers] = useState<User[]>([]);
-  const [showRequestModal, setShowRequestModal] = useState(false);
-  const [incomingRequest, setIncomingRequest] = useState<string | null>(null);
-  const [targetUser, setTargetUser] = useState<string | null>(null);
 
+  // ── View state ──
+  const [view, setView] = useState<View>("world");
+
+  // ── Invitation flow state ──
+  const [outgoingTarget, setOutgoingTarget] = useState<string | null>(null);
+  const [outgoingStatus, setOutgoingStatus] =
+    useState<OutgoingStatus>("idle");
+  const [incomingRequest, setIncomingRequest] = useState<string | null>(null);
+
+  // ── Chat state ──
+  const [chatTarget, setChatTarget] = useState<string | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [rtcStatus, setRtcStatus] = useState<RtcStatus>("disconnected");
+
+  // ── Refs (stable across renders) ──
   const wsRef = useRef<WebSocket | null>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const dcRef = useRef<RTCDataChannel | null>(null);
   const myId = useRef(crypto.randomUUID());
-  const myColor = useRef(hslToHex(Math.random() * 360, 0.7, 0.6));
+  const myColor = useRef(randomColor());
+  const myPosition = useRef(randomPosition());
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** true = this client is the "offerer" (the one who sent the invitation) */
+  const isOfferer = useRef(false);
 
   const WORLD_WSS_URL = import.meta.env.VITE_WORLD_WSS_URL;
 
-  // Random spawn position
-  const myPosition = useRef<[number, number, number]>([
-    (Math.random() - 0.5) * 8,
-    0.5,
-    (Math.random() - 0.5) * 8,
-  ]);
+  // ────────────────────────────────────────────────────────────────
+  // WebSocket helpers
+  // ────────────────────────────────────────────────────────────────
 
-  const connect = () => {
+  const wsSend = useCallback(
+    (payload: Record<string, unknown>) => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify(payload));
+      }
+    },
+    [],
+  );
+
+  // ────────────────────────────────────────────────────────────────
+  // WebRTC helpers
+  // ────────────────────────────────────────────────────────────────
+
+  /** Tear down the RTCPeerConnection & DataChannel cleanly. */
+  const cleanupRtc = useCallback(() => {
+    dcRef.current?.close();
+    dcRef.current = null;
+    pcRef.current?.close();
+    pcRef.current = null;
+    setRtcStatus("disconnected");
+  }, []);
+
+  /** Wire up DataChannel events (shared by offerer & answerer). */
+  const setupDataChannel = useCallback(
+    (dc: RTCDataChannel) => {
+      dcRef.current = dc;
+
+      dc.onopen = () => {
+        console.log("[WebRTC] DataChannel open");
+        setRtcStatus("connected");
+      };
+
+      dc.onclose = () => {
+        console.log("[WebRTC] DataChannel closed");
+        setRtcStatus("disconnected");
+      };
+
+      dc.onmessage = (e) => {
+        setMessages((prev) => [
+          ...prev,
+          { from: "peer", text: e.data, timestamp: Date.now() },
+        ]);
+      };
+    },
+    [],
+  );
+
+  /** Create a new peer connection and hook it up. */
+  const createPeerConnection = useCallback(
+    (targetId: string) => {
+      cleanupRtc();
+
+      const pc = new RTCPeerConnection(STUN_SERVERS);
+      pcRef.current = pc;
+      setRtcStatus("connecting");
+
+      // Relay ICE candidates via the World DO
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          wsSend({
+            type: "rtc-ice-candidate",
+            target: targetId,
+            payload: e.candidate.toJSON(),
+          });
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        console.log("[WebRTC] Connection state:", pc.connectionState);
+        if (pc.connectionState === "failed") {
+          setRtcStatus("failed");
+        }
+      };
+
+      // Answerer receives the channel via this event
+      pc.ondatachannel = (e) => {
+        console.log("[WebRTC] Received remote DataChannel");
+        setupDataChannel(e.channel);
+      };
+
+      return pc;
+    },
+    [cleanupRtc, wsSend, setupDataChannel],
+  );
+
+  /** Offerer: create offer and send it. */
+  const startOffer = useCallback(
+    async (targetId: string) => {
+      const pc = createPeerConnection(targetId);
+
+      // Offerer creates the DataChannel
+      const dc = pc.createDataChannel("chat");
+      setupDataChannel(dc);
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      wsSend({
+        type: "rtc-offer",
+        target: targetId,
+        payload: pc.localDescription!.toJSON(),
+      });
+
+      console.log("[WebRTC] Sent offer to", targetId);
+    },
+    [createPeerConnection, setupDataChannel, wsSend],
+  );
+
+  /** Answerer: handle the incoming offer, create answer. */
+  const handleOffer = useCallback(
+    async (fromId: string, offer: RTCSessionDescriptionInit) => {
+      const pc = createPeerConnection(fromId);
+
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      wsSend({
+        type: "rtc-answer",
+        target: fromId,
+        payload: pc.localDescription!.toJSON(),
+      });
+
+      console.log("[WebRTC] Sent answer to", fromId);
+    },
+    [createPeerConnection, wsSend],
+  );
+
+  /** Offerer: handle the returned answer. */
+  const handleAnswer = useCallback(
+    async (answer: RTCSessionDescriptionInit) => {
+      const pc = pcRef.current;
+      if (!pc) return;
+      await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      console.log("[WebRTC] Remote description set (answer)");
+    },
+    [],
+  );
+
+  /** Both sides: add ICE candidate. */
+  const handleIceCandidate = useCallback(
+    async (candidate: RTCIceCandidateInit) => {
+      const pc = pcRef.current;
+      if (!pc) return;
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (err) {
+        console.warn("[WebRTC] Failed to add ICE candidate:", err);
+      }
+    },
+    [],
+  );
+
+  // ────────────────────────────────────────────────────────────────
+  // Transition: enter private chat view
+  // ────────────────────────────────────────────────────────────────
+
+  const enterChat = useCallback(
+    (peerId: string, offerer: boolean) => {
+      // Clear invitation UI
+      setOutgoingTarget(null);
+      setOutgoingStatus("idle");
+      setIncomingRequest(null);
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+
+      // Set chat state
+      setChatTarget(peerId);
+      setMessages([]);
+      isOfferer.current = offerer;
+      setView("chat");
+
+      // The offerer kicks off WebRTC negotiations
+      if (offerer) {
+        startOffer(peerId);
+      }
+      // (The answerer waits for the rtc-offer message, handled in handleMessage)
+    },
+    [startOffer],
+  );
+
+  // ────────────────────────────────────────────────────────────────
+  // Transition: leave chat and return to world
+  // ────────────────────────────────────────────────────────────────
+
+  const leaveChat = useCallback(() => {
+    cleanupRtc();
+    setChatTarget(null);
+    setMessages([]);
+    setView("world");
+
+    // Respawn with a new position so it feels fresh
+    myPosition.current = randomPosition();
+    myColor.current = randomColor();
+
+    // Reconnect to world WebSocket
+    // (We close the old one, then let the connect() function re-open it)
+    wsRef.current?.close();
+  }, [cleanupRtc]);
+
+  // ────────────────────────────────────────────────────────────────
+  // WebSocket message handler
+  // ────────────────────────────────────────────────────────────────
+
+  const handleMessage = useCallback(
+    (data: Record<string, any>) => {
+      switch (data.type) {
+        // ── World presence ──
+        case "world-state":
+          setUsers(data.users);
+          break;
+
+        case "user-joined":
+          setUsers((prev) => [
+            ...prev.filter((u) => u.id !== data.user.id),
+            data.user,
+          ]);
+          break;
+
+        case "user-left":
+          setUsers((prev) => prev.filter((u) => u.id !== data.id));
+          break;
+
+        // ── Chat invitation flow ──
+        case "chat-request":
+          // Ignore if already in a chat or handling another request
+          if (view === "chat" || incomingRequest) break;
+          setIncomingRequest(data.from);
+          break;
+
+        case "chat-response":
+          if (timeoutRef.current) clearTimeout(timeoutRef.current);
+
+          if (data.accept) {
+            // Both users transition to chat; the sender is the offerer
+            enterChat(data.from, true);
+          } else {
+            setOutgoingStatus("declined");
+          }
+          break;
+
+        // ── WebRTC signaling relay ──
+        case "rtc-offer":
+          handleOffer(data.from, data.payload);
+          break;
+
+        case "rtc-answer":
+          handleAnswer(data.payload);
+          break;
+
+        case "rtc-ice-candidate":
+          handleIceCandidate(data.payload);
+          break;
+      }
+    },
+    [view, incomingRequest, enterChat, handleOffer, handleAnswer, handleIceCandidate],
+  );
+
+  // Keep handleMessage ref up-to-date for the WebSocket onmessage
+  const handleMessageRef = useRef(handleMessage);
+  useEffect(() => {
+    handleMessageRef.current = handleMessage;
+  }, [handleMessage]);
+
+  // ────────────────────────────────────────────────────────────────
+  // Connect to world WebSocket
+  // ────────────────────────────────────────────────────────────────
+
+  const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     setIsConnecting(true);
@@ -56,7 +380,6 @@ function App() {
     ws.onopen = () => {
       setConnected(true);
       setIsConnecting(false);
-      // Send spawn position
       ws.send(
         JSON.stringify({
           type: "spawn",
@@ -71,7 +394,7 @@ function App() {
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      handleMessage(data);
+      handleMessageRef.current(data);
     };
 
     ws.onclose = () => {
@@ -87,78 +410,97 @@ function App() {
     };
 
     wsRef.current = ws;
-  };
+  }, [WORLD_WSS_URL]);
 
-  const handleMessage = (data: any) => {
-    switch (data.type) {
-      case "world-state":
-        // Received current list of all users
-        setUsers(data.users);
-        break;
-      case "user-joined":
-        setUsers((prev) => [
-          ...prev.filter((u) => u.id !== data.user.id),
-          data.user,
-        ]);
-        break;
-      case "user-left":
-        setUsers((prev) => prev.filter((u) => u.id !== data.id));
-        break;
-      case "chat-request":
-        // Someone clicked on us
-        setIncomingRequest(data.from);
-        setShowRequestModal(true);
-        break;
-      case "chat-response":
-        if (data.accept) {
-          // Navigate to private room (we'll implement next)
-          console.log("Chat accepted! Navigate to room:", data.roomId);
-        } else {
-          alert("User declined chat request");
-        }
-        break;
+  // Auto-reconnect when returning from chat view
+  useEffect(() => {
+    if (
+      view === "world" &&
+      !connected &&
+      !isConnecting &&
+      !wsRef.current
+    ) {
+      // Small delay so the previous socket finishes closing
+      const t = setTimeout(connect, 300);
+      return () => clearTimeout(t);
     }
-  };
+  }, [view, connected, isConnecting, connect]);
 
-  const sendChatRequest = (targetId: string) => {
-    if (!wsRef.current) return;
-    setTargetUser(targetId);
-    wsRef.current.send(
-      JSON.stringify({
-        type: "chat-request",
-        target: targetId,
-      }),
-    );
-  };
+  // ────────────────────────────────────────────────────────────────
+  // Invitation actions
+  // ────────────────────────────────────────────────────────────────
 
-  const respondToRequest = (accept: boolean) => {
-    if (!wsRef.current || !incomingRequest) return;
+  /** User clicked an avatar → open outgoing modal. */
+  const handleAvatarClick = useCallback((targetId: string) => {
+    setOutgoingTarget(targetId);
+    setOutgoingStatus("idle");
+  }, []);
 
+  /** User confirmed "Send Request" in the outgoing modal. */
+  const sendInvitation = useCallback(() => {
+    if (!outgoingTarget) return;
+    wsSend({ type: "chat-request", target: outgoingTarget });
+    setOutgoingStatus("waiting");
+
+    // Start 15 s timeout
+    timeoutRef.current = setTimeout(() => {
+      setOutgoingStatus("timeout");
+    }, INVITATION_TIMEOUT_MS);
+  }, [outgoingTarget, wsSend]);
+
+  /** Dismiss outgoing modal (cancel / close after timeout). */
+  const cancelOutgoing = useCallback(() => {
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    setOutgoingTarget(null);
+    setOutgoingStatus("idle");
+  }, []);
+
+  /** User accepted an incoming request. */
+  const acceptIncoming = useCallback(() => {
+    if (!incomingRequest) return;
     const roomId = [myId.current, incomingRequest].sort().join("-");
+    wsSend({
+      type: "chat-response",
+      target: incomingRequest,
+      accept: true,
+      roomId,
+    });
+    // Answerer enters chat (will receive rtc-offer shortly)
+    enterChat(incomingRequest, false);
+  }, [incomingRequest, wsSend, enterChat]);
 
-    wsRef.current.send(
-      JSON.stringify({
-        type: "chat-response",
-        target: incomingRequest,
-        accept,
-        roomId,
-      }),
-    );
-
-    setShowRequestModal(false);
+  /** User declined an incoming request. */
+  const declineIncoming = useCallback(() => {
+    if (!incomingRequest) return;
+    wsSend({
+      type: "chat-response",
+      target: incomingRequest,
+      accept: false,
+      roomId: "",
+    });
     setIncomingRequest(null);
+  }, [incomingRequest, wsSend]);
 
-    if (accept) {
-      // Navigate to private chat
-      console.log("Joining room:", roomId);
-    }
-  };
+  /** Send a chat message over the DataChannel. */
+  const sendChatMessage = useCallback((text: string) => {
+    const dc = dcRef.current;
+    if (!dc || dc.readyState !== "open") return;
+    dc.send(text);
+    setMessages((prev) => [
+      ...prev,
+      { from: "me", text, timestamp: Date.now() },
+    ]);
+  }, []);
 
-  const disconnect = () => {
+  const disconnect = useCallback(() => {
     wsRef.current?.close();
-  };
+  }, []);
 
-  if (!connected) {
+  // ────────────────────────────────────────────────────────────────
+  // Render: Login screen
+  // ────────────────────────────────────────────────────────────────
+
+  if (!connected && view === "world") {
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6">
         <div className="bg-white rounded-2xl shadow-lg border border-slate-200 p-8 w-full max-w-md text-center">
@@ -170,7 +512,7 @@ function App() {
             {isConnecting ? (
               <>
                 <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />
-                <span className="font-medium text-blue-700">Connecting...</span>
+                <span className="font-medium text-blue-700">Connecting…</span>
               </>
             ) : (
               <>
@@ -190,12 +532,32 @@ function App() {
             ) : (
               <Wifi className="w-5 h-5" />
             )}
-            {isConnecting ? "Connecting..." : "Enter World"}
+            {isConnecting ? "Connecting…" : "Enter World"}
           </button>
         </div>
       </div>
     );
   }
+
+  // ────────────────────────────────────────────────────────────────
+  // Render: Private Chat view
+  // ────────────────────────────────────────────────────────────────
+
+  if (view === "chat" && chatTarget) {
+    return (
+      <PrivateChat
+        peerId={chatTarget}
+        messages={messages}
+        rtcStatus={rtcStatus}
+        onSend={sendChatMessage}
+        onLeave={leaveChat}
+      />
+    );
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // Render: 3D World view
+  // ────────────────────────────────────────────────────────────────
 
   return (
     <div className="relative w-full h-screen">
@@ -205,10 +567,10 @@ function App() {
         myId={myId.current}
         myPosition={myPosition.current}
         myColor={myColor.current}
-        onAvatarClick={sendChatRequest}
+        onAvatarClick={handleAvatarClick}
       />
 
-      {/* UI Overlay */}
+      {/* ── HUD Overlay ── */}
       <div className="absolute top-4 left-4 bg-white/90 backdrop-blur rounded-xl p-4 shadow-lg border border-slate-200 max-w-xs">
         <div className="flex items-center gap-2 mb-2">
           <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
@@ -218,7 +580,7 @@ function App() {
           ID: {myId.current.slice(0, 8)}
         </p>
         <p className="text-sm text-slate-600 mb-4">
-          Click on other spheres to chat
+          Click on another avatar to chat
         </p>
         <button
           onClick={disconnect}
@@ -235,48 +597,23 @@ function App() {
         </span>
       </div>
 
-      {/* Chat Request Modal */}
-      {showRequestModal && (
-        <div className="absolute inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl p-6 max-w-sm w-full mx-4 shadow-2xl">
-            <h3 className="text-lg font-bold text-slate-800 mb-2">
-              Chat Request
-            </h3>
-            <p className="text-slate-600 mb-6">
-              User{" "}
-              <span className="font-mono font-medium">
-                {incomingRequest?.slice(0, 8)}
-              </span>{" "}
-              wants to chat with you
-            </p>
-            <div className="flex gap-3">
-              <button
-                onClick={() => respondToRequest(false)}
-                className="flex-1 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-medium transition-colors"
-              >
-                Decline
-              </button>
-              <button
-                onClick={() => respondToRequest(true)}
-                className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
-              >
-                Accept
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* ── Outgoing invitation modal ── */}
+      {outgoingTarget && (
+        <OutgoingInvitationModal
+          targetId={outgoingTarget}
+          status={outgoingStatus}
+          onSend={sendInvitation}
+          onCancel={cancelOutgoing}
+        />
       )}
 
-      {/* Waiting for response indicator */}
-      {targetUser && !incomingRequest && (
-        <div className="absolute bottom-8 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur rounded-full px-6 py-3 shadow-lg border border-slate-200">
-          <div className="flex items-center gap-2">
-            <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
-            <span className="text-sm font-medium text-slate-700">
-              Waiting for {targetUser.slice(0, 8)} to respond...
-            </span>
-          </div>
-        </div>
+      {/* ── Incoming invitation modal ── */}
+      {incomingRequest && !outgoingTarget && (
+        <IncomingInvitationModal
+          fromId={incomingRequest}
+          onAccept={acceptIncoming}
+          onDecline={declineIncoming}
+        />
       )}
     </div>
   );
