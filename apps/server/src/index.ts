@@ -1,9 +1,9 @@
-import { ChatRoom } from "./room";
+import { World } from "./world";
 
-export { ChatRoom };
+export { World };
 
 export interface Env {
-  CHAT_ROOMS: DurableObjectNamespace<ChatRoom>;
+  WORLD: DurableObjectNamespace<World>;
 }
 
 export default {
@@ -22,11 +22,11 @@ export default {
     }
 
     // Route to Durable Object
-    if (url.pathname.startsWith("/room/")) {
-      const roomName = url.pathname.split("/")[2];
-      const id = env.CHAT_ROOMS.idFromName(roomName);
-      const room = env.CHAT_ROOMS.get(id);
-      return room.fetch(request);
+    if (url.pathname.startsWith("/world/")) {
+      const worldName = url.pathname.split("/")[2];
+      const id = env.WORLD.idFromName(worldName);
+      const world = env.WORLD.get(id);
+      return world.fetch(request);
     }
 
     return new Response("Not Found", { status: 404 });

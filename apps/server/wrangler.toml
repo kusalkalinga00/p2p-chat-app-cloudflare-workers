@@ -3,9 +3,9 @@ main = "src/index.ts"
 compatibility_date = "2024-01-01"
 
 [[durable_objects.bindings]]
-name = "CHAT_ROOMS"
-class_name = "ChatRoom"
+name = "WORLD"
+class_name = "World"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["ChatRoom"]
+new_classes = ["World"]
