@@ -23,6 +23,8 @@ function App() {
   const myId = useRef(crypto.randomUUID());
   const myColor = useRef(`hsl(${Math.random() * 360}, 70%, 60%)`);
 
+  const WORLD_WSS_URL = import.meta.env.VITE_WORLD_WSS_URL;
+
   // Random spawn position
   const myPosition = useRef<[number, number, number]>([
     (Math.random() - 0.5) * 8,
@@ -34,9 +36,7 @@ function App() {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     setIsConnecting(true);
-    const ws = new WebSocket(
-      `ws://localhost:8787/room/world?id=${myId.current}`,
-    );
+    const ws = new WebSocket(`${WORLD_WSS_URL}/world/world?id=${myId.current}`);
 
     ws.onopen = () => {
       setConnected(true);
