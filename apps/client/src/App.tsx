@@ -11,6 +11,21 @@ interface User {
   available: boolean;
 }
 
+/** Convert HSL (h: 0-360, s/l: 0-1) to a deterministic hex string. */
+function hslToHex(h: number, s: number, l: number): string {
+  h /= 360;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => {
+    const k = (n + h * 12) % 12;
+    return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+  };
+  const toHex = (x: number) =>
+    Math.round(x * 255)
+      .toString(16)
+      .padStart(2, "0");
+  return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`;
+}
+
 function App() {
   const [connected, setConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -21,7 +36,7 @@ function App() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const myId = useRef(crypto.randomUUID());
-  const myColor = useRef(`hsl(${Math.random() * 360}, 70%, 60%)`);
+  const myColor = useRef(hslToHex(Math.random() * 360, 0.7, 0.6));
 
   const WORLD_WSS_URL = import.meta.env.VITE_WORLD_WSS_URL;
 

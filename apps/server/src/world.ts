@@ -1,22 +1,49 @@
 import { DurableObject } from "cloudflare:workers";
 import { Env } from ".";
 
-interface User {
+/**
+ * Data persisted in each WebSocket's attachment.
+ * Attachments survive hibernation, unlike in-memory JS state.
+ */
+interface WsAttachment {
   id: string;
   x: number;
   y: number;
   z: number;
   color: string;
   available: boolean;
-  ws: WebSocket;
+  /** false until the client sends "spawn" */
+  spawned: boolean;
 }
 
 export class World extends DurableObject<Env> {
-  private users: Map<string, User> = new Map();
-
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
   }
+
+  // ── Helpers ──────────────────────────────────────────────────────
+
+  /** Return all spawned users' data (read from WebSocket attachments). */
+  private getSpawnedUsers(): { meta: WsAttachment; ws: WebSocket }[] {
+    return this.ctx
+      .getWebSockets()
+      .map((ws) => ({
+        meta: ws.deserializeAttachment() as WsAttachment,
+        ws,
+      }))
+      .filter((entry) => entry.meta.spawned);
+  }
+
+  /** Find a specific user's WebSocket by their ID. */
+  private findSocket(userId: string): WebSocket | undefined {
+    for (const ws of this.ctx.getWebSockets()) {
+      const meta = ws.deserializeAttachment() as WsAttachment;
+      if (meta.id === userId && meta.spawned) return ws;
+    }
+    return undefined;
+  }
+
+  // ── WebSocket lifecycle ──────────────────────────────────────────
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -34,67 +61,82 @@ export class World extends DurableObject<Env> {
     const [client, server] = Object.values(new WebSocketPair());
 
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ id });
 
-    // Send current world state (all existing users) to new connection
-    const currentUsers = Array.from(this.users.values()).map((u) => ({
-      id: u.id,
-      x: u.x,
-      y: u.y,
-      z: u.z,
-      color: u.color,
-      available: u.available,
-    }));
-
-    server.send(
-      JSON.stringify({
-        type: "world-state",
-        users: currentUsers,
-      }),
-    );
+    // Store initial attachment – spawned: false until the client sends "spawn"
+    server.serializeAttachment({
+      id,
+      x: 0,
+      y: 0,
+      z: 0,
+      color: "",
+      available: false,
+      spawned: false,
+    } satisfies WsAttachment);
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     const data = JSON.parse(message as string);
-    const attachment = ws.deserializeAttachment() as { id: string };
+    const attachment = ws.deserializeAttachment() as WsAttachment;
 
     switch (data.type) {
-      case "spawn":
-        // Register user with their 3D position and appearance
-        this.users.set(attachment.id, {
+      case "spawn": {
+        // 1. Send current world-state (all already-spawned users) to
+        //    this newly connected user so they see everyone.
+        const currentUsers = this.getSpawnedUsers()
+          .filter((u) => u.meta.id !== attachment.id)
+          .map((u) => ({
+            id: u.meta.id,
+            x: u.meta.x,
+            y: u.meta.y,
+            z: u.meta.z,
+            color: u.meta.color,
+            available: u.meta.available,
+          }));
+
+        ws.send(
+          JSON.stringify({
+            type: "world-state",
+            users: currentUsers,
+          }),
+        );
+
+        // 2. Persist this user's data in the WebSocket attachment
+        //    (survives hibernation).
+        const updated: WsAttachment = {
           id: attachment.id,
           x: data.x,
           y: data.y,
           z: data.z,
           color: data.color,
           available: data.available,
-          ws,
-        });
+          spawned: true,
+        };
+        ws.serializeAttachment(updated);
 
-        // Broadcast to all other users that someone joined
+        // 3. Broadcast to everyone else that a new user joined.
         this.broadcast(
           {
             type: "user-joined",
             user: {
-              id: attachment.id,
-              x: data.x,
-              y: data.y,
-              z: data.z,
-              color: data.color,
-              available: data.available,
+              id: updated.id,
+              x: updated.x,
+              y: updated.y,
+              z: updated.z,
+              color: updated.color,
+              available: updated.available,
             },
           },
-          attachment.id,
+          updated.id,
         );
         break;
+      }
 
-      case "chat-request":
-        // Forward chat request to specific target user
-        const target = this.users.get(data.target);
+      case "chat-request": {
+        const target = this.findSocket(data.target);
         if (target) {
-          target.ws.send(
+          target.send(
             JSON.stringify({
               type: "chat-request",
               from: attachment.id,
@@ -102,12 +144,12 @@ export class World extends DurableObject<Env> {
           );
         }
         break;
+      }
 
-      case "chat-response":
-        // Forward accept/decline response back to the requester
-        const requester = this.users.get(data.target);
+      case "chat-response": {
+        const requester = this.findSocket(data.target);
         if (requester) {
-          requester.ws.send(
+          requester.send(
             JSON.stringify({
               type: "chat-response",
               from: attachment.id,
@@ -117,18 +159,15 @@ export class World extends DurableObject<Env> {
           );
         }
         break;
+      }
 
       default:
-        // Broadcast other messages to everyone
         this.broadcast({ ...data, from: attachment.id });
     }
   }
 
   async webSocketClose(ws: WebSocket) {
-    const attachment = ws.deserializeAttachment() as { id: string };
-
-    // Remove user from world
-    this.users.delete(attachment.id);
+    const attachment = ws.deserializeAttachment() as WsAttachment;
 
     // Notify remaining users
     this.broadcast({
@@ -137,12 +176,10 @@ export class World extends DurableObject<Env> {
     });
   }
 
-  broadcast(message: object, excludeId?: string) {
+  private broadcast(message: object, excludeId?: string) {
     const msg = JSON.stringify(message);
-    const websockets = this.ctx.getWebSockets();
 
-    for (const ws of websockets) {
-      const meta = ws.deserializeAttachment() as { id: string };
+    for (const { meta, ws } of this.getSpawnedUsers()) {
       if (meta.id !== excludeId && ws.readyState === WebSocket.OPEN) {
         ws.send(msg);
       }
