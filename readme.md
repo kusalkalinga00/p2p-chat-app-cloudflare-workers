@@ -133,4 +133,3 @@ If you change DO class names or bindings, update migrations and redeploy.
 - `rtc-offer`
 - `rtc-answer`
 - `rtc-ice-candidate`
-
