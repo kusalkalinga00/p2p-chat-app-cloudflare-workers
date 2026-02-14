@@ -7,5 +7,5 @@ name = "WORLD"
 class_name = "World"
 
 [[migrations]]
-tag = "v1"
-new_classes = ["World"]
+tag = "v2"
+new_sqlite_classes = ["World"]
