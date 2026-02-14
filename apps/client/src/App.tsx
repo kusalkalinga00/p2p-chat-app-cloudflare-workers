@@ -269,6 +269,9 @@ function App() {
       setIncomingRequest(null);
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
 
+      // Mark ourselves as unavailable so no one else can invite us
+      wsSend({ type: "set-available", available: false });
+
       // Set chat state
       setChatTarget(peerId);
       setMessages([]);
@@ -281,7 +284,7 @@ function App() {
       }
       // (The answerer waits for the rtc-offer message, handled in handleMessage)
     },
-    [startOffer],
+    [startOffer, wsSend],
   );
 
   // ────────────────────────────────────────────────────────────────
@@ -294,14 +297,10 @@ function App() {
     setMessages([]);
     setView("world");
 
-    // Respawn with a new position so it feels fresh
-    myPosition.current = randomPosition();
-    myColor.current = randomColor();
-
-    // Reconnect to world WebSocket
-    // (We close the old one, then let the connect() function re-open it)
-    wsRef.current?.close();
-  }, [cleanupRtc]);
+    // Mark ourselves as available again — keep the WebSocket open
+    // so there's no reconnect race condition.
+    wsSend({ type: "set-available", available: true });
+  }, [cleanupRtc, wsSend]);
 
   // ────────────────────────────────────────────────────────────────
   // WebSocket message handler
@@ -324,6 +323,15 @@ function App() {
 
         case "user-left":
           setUsers((prev) => prev.filter((u) => u.id !== data.id));
+          break;
+
+        // ── World availability ──
+        case "availability-changed":
+          setUsers((prev) =>
+            prev.map((u) =>
+              u.id === data.id ? { ...u, available: data.available } : u,
+            ),
+          );
           break;
 
         // ── Chat invitation flow ──
@@ -412,7 +420,8 @@ function App() {
     wsRef.current = ws;
   }, [WORLD_WSS_URL]);
 
-  // Auto-reconnect when returning from chat view
+  // Auto-reconnect only on unexpected disconnect (e.g. server restart).
+  // We no longer close the WS when entering/leaving chat.
   useEffect(() => {
     if (
       view === "world" &&
@@ -430,11 +439,16 @@ function App() {
   // Invitation actions
   // ────────────────────────────────────────────────────────────────
 
-  /** User clicked an avatar → open outgoing modal. */
-  const handleAvatarClick = useCallback((targetId: string) => {
-    setOutgoingTarget(targetId);
-    setOutgoingStatus("idle");
-  }, []);
+  /** User clicked an avatar → open outgoing modal (only if they're available). */
+  const handleAvatarClick = useCallback(
+    (targetId: string) => {
+      const target = users.find((u) => u.id === targetId);
+      if (target && !target.available) return; // busy / in chat
+      setOutgoingTarget(targetId);
+      setOutgoingStatus("idle");
+    },
+    [users],
+  );
 
   /** User confirmed "Send Request" in the outgoing modal. */
   const sendInvitation = useCallback(() => {
