@@ -133,9 +133,43 @@ export class World extends DurableObject<Env> {
         break;
       }
 
+      case "set-available": {
+        // Update this user's availability in their attachment and
+        // broadcast the change so all clients update their UI.
+        const updatedAvail: WsAttachment = {
+          ...attachment,
+          available: data.available,
+        };
+        ws.serializeAttachment(updatedAvail);
+
+        this.broadcast(
+          {
+            type: "availability-changed",
+            id: attachment.id,
+            available: data.available,
+          },
+          attachment.id,
+        );
+        break;
+      }
+
       case "chat-request": {
+        // Only forward if the target is available
         const target = this.findSocket(data.target);
         if (target) {
+          const targetMeta = target.deserializeAttachment() as WsAttachment;
+          if (!targetMeta.available) {
+            // Target is busy — send an immediate decline back to sender
+            ws.send(
+              JSON.stringify({
+                type: "chat-response",
+                from: data.target,
+                accept: false,
+                roomId: "",
+              }),
+            );
+            break;
+          }
           target.send(
             JSON.stringify({
               type: "chat-request",
