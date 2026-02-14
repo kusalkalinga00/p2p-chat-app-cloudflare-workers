@@ -1,5 +1,7 @@
 # P2P Chat (3D World + WebRTC)
 
+![World Preview](readme_assets/world.png)
+
 A monorepo for a peer-to-peer chat application with:
 
 - React + Vite + React Three Fiber frontend (3D island world)
@@ -131,11 +133,4 @@ If you change DO class names or bindings, update migrations and redeploy.
 - `rtc-offer`
 - `rtc-answer`
 - `rtc-ice-candidate`
-
-
-
-
-
-
-
 
