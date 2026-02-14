@@ -10,84 +10,29 @@ import {
   IncomingInvitationModal,
 } from "./components/InvitationModal";
 import { Wifi, WifiOff, Loader2 } from "lucide-react";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface User {
-  id: string;
-  x: number;
-  y: number;
-  z: number;
-  color: string;
-  available: boolean;
-}
-
-type View = "world" | "chat";
-type OutgoingStatus = "idle" | "waiting" | "timeout" | "declined";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Convert HSL (h: 0-360, s/l: 0-1) to a deterministic hex string. */
-function hslToHex(h: number, s: number, l: number): string {
-  h /= 360;
-  const a = s * Math.min(l, 1 - l);
-  const f = (n: number) => {
-    const k = (n + h * 12) % 12;
-    return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
-  };
-  const toHex = (x: number) =>
-    Math.round(x * 255)
-      .toString(16)
-      .padStart(2, "0");
-  return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`;
-}
-
-function randomColor() {
-  return hslToHex(Math.random() * 360, 0.7, 0.6);
-}
-
-function randomPosition(): [number, number, number] {
-  return [(Math.random() - 0.5) * 8, 0.5, (Math.random() - 0.5) * 8];
-}
-
-const STUN_SERVERS: RTCConfiguration = {
-  iceServers: [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-  ],
-};
-
-const INVITATION_TIMEOUT_MS = 15_000;
-
-// ---------------------------------------------------------------------------
-// App
-// ---------------------------------------------------------------------------
+import type { OutgoingStatus, User, View } from "./types/index.types";
+import {
+  INVITATION_TIMEOUT_MS,
+  STUN_SERVERS,
+  WORLD_WSS_URL,
+} from "./lib/constants";
+import { randomColor, randomPosition } from "./lib/utils";
 
 function App() {
-  // ── Connection state ──
   const [connected, setConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [users, setUsers] = useState<User[]>([]);
 
-  // ── View state ──
   const [view, setView] = useState<View>("world");
 
-  // ── Invitation flow state ──
   const [outgoingTarget, setOutgoingTarget] = useState<string | null>(null);
-  const [outgoingStatus, setOutgoingStatus] =
-    useState<OutgoingStatus>("idle");
+  const [outgoingStatus, setOutgoingStatus] = useState<OutgoingStatus>("idle");
   const [incomingRequest, setIncomingRequest] = useState<string | null>(null);
 
-  // ── Chat state ──
   const [chatTarget, setChatTarget] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [rtcStatus, setRtcStatus] = useState<RtcStatus>("disconnected");
 
-  // ── Refs (stable across renders) ──
   const wsRef = useRef<WebSocket | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
@@ -95,23 +40,13 @@ function App() {
   const myColor = useRef(randomColor());
   const myPosition = useRef(randomPosition());
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** true = this client is the "offerer" (the one who sent the invitation) */
   const isOfferer = useRef(false);
 
-  const WORLD_WSS_URL = import.meta.env.VITE_WORLD_WSS_URL;
-
-  // ────────────────────────────────────────────────────────────────
-  // WebSocket helpers
-  // ────────────────────────────────────────────────────────────────
-
-  const wsSend = useCallback(
-    (payload: Record<string, unknown>) => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify(payload));
-      }
-    },
-    [],
-  );
+  const wsSend = useCallback((payload: Record<string, unknown>) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(payload));
+    }
+  }, []);
 
   // ────────────────────────────────────────────────────────────────
   // WebRTC helpers
@@ -127,29 +62,26 @@ function App() {
   }, []);
 
   /** Wire up DataChannel events (shared by offerer & answerer). */
-  const setupDataChannel = useCallback(
-    (dc: RTCDataChannel) => {
-      dcRef.current = dc;
+  const setupDataChannel = useCallback((dc: RTCDataChannel) => {
+    dcRef.current = dc;
 
-      dc.onopen = () => {
-        console.log("[WebRTC] DataChannel open");
-        setRtcStatus("connected");
-      };
+    dc.onopen = () => {
+      console.log("[WebRTC] DataChannel open");
+      setRtcStatus("connected");
+    };
 
-      dc.onclose = () => {
-        console.log("[WebRTC] DataChannel closed");
-        setRtcStatus("disconnected");
-      };
+    dc.onclose = () => {
+      console.log("[WebRTC] DataChannel closed");
+      setRtcStatus("disconnected");
+    };
 
-      dc.onmessage = (e) => {
-        setMessages((prev) => [
-          ...prev,
-          { from: "peer", text: e.data, timestamp: Date.now() },
-        ]);
-      };
-    },
-    [],
-  );
+    dc.onmessage = (e) => {
+      setMessages((prev) => [
+        ...prev,
+        { from: "peer", text: e.data, timestamp: Date.now() },
+      ]);
+    };
+  }, []);
 
   /** Create a new peer connection and hook it up. */
   const createPeerConnection = useCallback(
@@ -366,7 +298,14 @@ function App() {
           break;
       }
     },
-    [view, incomingRequest, enterChat, handleOffer, handleAnswer, handleIceCandidate],
+    [
+      view,
+      incomingRequest,
+      enterChat,
+      handleOffer,
+      handleAnswer,
+      handleIceCandidate,
+    ],
   );
 
   // Keep handleMessage ref up-to-date for the WebSocket onmessage
@@ -423,12 +362,7 @@ function App() {
   // Auto-reconnect only on unexpected disconnect (e.g. server restart).
   // We no longer close the WS when entering/leaving chat.
   useEffect(() => {
-    if (
-      view === "world" &&
-      !connected &&
-      !isConnecting &&
-      !wsRef.current
-    ) {
+    if (view === "world" && !connected && !isConnecting && !wsRef.current) {
       // Small delay so the previous socket finishes closing
       const t = setTimeout(connect, 300);
       return () => clearTimeout(t);
@@ -509,10 +443,6 @@ function App() {
   const disconnect = useCallback(() => {
     wsRef.current?.close();
   }, []);
-
-  // ────────────────────────────────────────────────────────────────
-  // Render: Login screen
-  // ────────────────────────────────────────────────────────────────
 
   if (!connected && view === "world") {
     return (
