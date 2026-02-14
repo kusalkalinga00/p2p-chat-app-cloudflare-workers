@@ -526,12 +526,6 @@ function App() {
         <p className="text-sm text-slate-600 mb-4">
           Click on another avatar to chat
         </p>
-        <button
-          onClick={disconnect}
-          className="w-full px-4 py-2 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg text-sm font-medium transition-colors"
-        >
-          Leave World
-        </button>
       </div>
 
       {/* User count */}
