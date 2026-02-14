@@ -9,7 +9,7 @@ import {
   OutgoingInvitationModal,
   IncomingInvitationModal,
 } from "./components/InvitationModal";
-import { Wifi, WifiOff, Loader2 } from "lucide-react";
+import { Wifi, WifiOff, Loader2, Users } from "lucide-react";
 import type { OutgoingStatus, User, View } from "./types/index.types";
 import {
   INVITATION_TIMEOUT_MS,
@@ -440,10 +440,6 @@ function App() {
     ]);
   }, []);
 
-  const disconnect = useCallback(() => {
-    wsRef.current?.close();
-  }, []);
-
   if (!connected && view === "world") {
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6">
@@ -530,9 +526,13 @@ function App() {
 
       {/* User count */}
       <div className="absolute top-4 right-4 bg-white/90 backdrop-blur rounded-xl px-4 py-2 shadow-lg border border-slate-200">
-        <span className="text-sm font-medium text-slate-700">
-          {users.length + 1} users online
-        </span>
+        <div className="flex items-center gap-2">
+          <Users className="w-4 h-4 text-slate-700" />
+          <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+          <span className="text-sm font-semibold text-slate-700">
+            {users.length + 1}
+          </span>
+        </div>
       </div>
 
       {/* ── Outgoing invitation modal ── */}
