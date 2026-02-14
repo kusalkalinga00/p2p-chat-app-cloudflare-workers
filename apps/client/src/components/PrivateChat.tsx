@@ -81,7 +81,7 @@ export function PrivateChat({
   const badge = statusConfig[rtcStatus];
 
   return (
-    <div className="w-full h-screen flex flex-col bg-slate-50">
+    <div className="relative w-full h-dvh min-h-dvh flex flex-col bg-slate-50 overflow-hidden">
       {/* ── Header ── */}
       <header className="flex items-center justify-between px-4 py-3 bg-white border-b border-slate-200 shadow-sm">
         <div className="flex items-center gap-3">
@@ -115,7 +115,7 @@ export function PrivateChat({
       {/* ── Messages ── */}
       <div
         ref={scrollRef}
-        className="flex-1 overflow-y-auto px-4 py-4 space-y-3"
+        className="flex-1 overflow-y-auto px-4 py-4 pb-6 space-y-3"
       >
         {messages.length === 0 && rtcStatus === "connected" && (
           <p className="text-center text-sm text-slate-400 mt-8">
@@ -163,7 +163,10 @@ export function PrivateChat({
       {/* ── Input ── */}
       <form
         onSubmit={handleSubmit}
-        className="flex items-center gap-2 px-4 py-3 bg-white border-t border-slate-200"
+        className="sticky bottom-0 z-10 flex items-center gap-2 px-4 pt-3 bg-white border-t border-slate-200"
+        style={{
+          paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 0.75rem)",
+        }}
       >
         <input
           type="text"
