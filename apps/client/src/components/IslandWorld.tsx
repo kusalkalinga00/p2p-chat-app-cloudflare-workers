@@ -237,10 +237,10 @@ function AvailabilityRing({ available }: { available: boolean }) {
   return (
     <mesh
       ref={ringRef}
-      position={[0, -0.45, 0]}
+      position={[0, -0.32, 0]}
       rotation={[-Math.PI / 2, 0, 0]}
     >
-      <ringGeometry args={[0.55, 0.7, 24]} />
+      <ringGeometry args={[0.4, 0.5, 24]} />
       <meshBasicMaterial
         color={available ? "#10B981" : "#6B7280"}
         transparent
@@ -287,8 +287,8 @@ function Avatar({
 
       {/* Local user glow ring on the ground */}
       {isLocal && (
-        <mesh position={[0, -0.44, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-          <ringGeometry args={[0.72, 1.0, 24]} />
+        <mesh position={[0, -0.31, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+          <ringGeometry args={[0.55, 0.75, 24]} />
           <meshBasicMaterial
             color="#3B82F6"
             transparent
@@ -316,7 +316,7 @@ function Avatar({
           document.body.style.cursor = "default";
         }}
       >
-        <sphereGeometry args={[0.5, 16, 16]} />
+        <sphereGeometry args={[0.35, 14, 14]} />
         <meshStandardMaterial
           color={color}
           emissive={isLocal ? "#3B82F6" : hovered ? color : "#000000"}
@@ -327,8 +327,8 @@ function Avatar({
 
       {/* Floating name label */}
       <Text
-        position={[0, 0.9, 0]}
-        fontSize={0.28}
+        position={[0, 0.68, 0]}
+        fontSize={0.22}
         color={isLocal ? "#3B82F6" : "#1F2937"}
         anchorX="center"
         anchorY="bottom"
@@ -339,8 +339,8 @@ function Avatar({
       </Text>
 
       {/* Availability status dot */}
-      <mesh position={[0, 1.25, 0]}>
-        <sphereGeometry args={[0.08, 8, 8]} />
+      <mesh position={[0, 0.95, 0]}>
+        <sphereGeometry args={[0.06, 8, 8]} />
         <meshStandardMaterial
           color={available || isLocal ? "#10B981" : "#EF4444"}
           emissive={available || isLocal ? "#10B981" : "#EF4444"}
@@ -407,9 +407,9 @@ const ISLANDS: IslandConfig[] = [
     // Center island – largest, teal
     position: [0, -1.5, 0],
     color: "#2DD4BF",
-    radiusTop: 4,
-    radiusBottom: 3.2,
-    height: 1.2,
+    radiusTop: 6.2,
+    radiusBottom: 4.8,
+    height: 1.6,
     segments: 8,
     bobSpeed: 0.35,
     trees: [
@@ -426,9 +426,9 @@ const ISLANDS: IslandConfig[] = [
     // Purple island – north-east
     position: [9, -1, -6],
     color: "#A78BFA",
-    radiusTop: 2.8,
-    radiusBottom: 2.2,
-    height: 0.9,
+    radiusTop: 1.8,
+    radiusBottom: 1.4,
+    height: 0.65,
     segments: 6,
     bobSpeed: 0.45,
     trees: [
@@ -441,9 +441,9 @@ const ISLANDS: IslandConfig[] = [
     // Amber island – south-west
     position: [-8, -1.2, 5],
     color: "#FBBF24",
-    radiusTop: 3.2,
-    radiusBottom: 2.6,
-    height: 1,
+    radiusTop: 1.9,
+    radiusBottom: 1.5,
+    height: 0.68,
     segments: 7,
     bobSpeed: 0.55,
     trees: [[0, 1.1, 0]],
@@ -456,9 +456,9 @@ const ISLANDS: IslandConfig[] = [
     // Coral island – south-east
     position: [6, -0.8, 7],
     color: "#FB7185",
-    radiusTop: 2.4,
-    radiusBottom: 1.8,
-    height: 0.8,
+    radiusTop: 1.6,
+    radiusBottom: 1.2,
+    height: 0.62,
     segments: 6,
     bobSpeed: 0.5,
     trees: [[-0.5, 0.75, 0.3]],
@@ -468,9 +468,9 @@ const ISLANDS: IslandConfig[] = [
     // Mint island – north-west
     position: [-7, -0.9, -7],
     color: "#6EE7B7",
-    radiusTop: 2.6,
-    radiusBottom: 2,
-    height: 0.85,
+    radiusTop: 1.7,
+    radiusBottom: 1.3,
+    height: 0.62,
     segments: 7,
     bobSpeed: 0.4,
     trees: [
@@ -483,13 +483,91 @@ const ISLANDS: IslandConfig[] = [
     // Small blue stepping stone
     position: [3, -1.6, -3],
     color: "#7DD3FC",
-    radiusTop: 1.6,
-    radiusBottom: 1.2,
-    height: 0.6,
+    radiusTop: 1.2,
+    radiusBottom: 0.9,
+    height: 0.48,
     segments: 6,
     bobSpeed: 0.6,
     trees: [],
     rocks: [{ pos: [0.5, 0, 0.2], scale: 0.5, color: "#0EA5E9" }],
+  },
+  {
+    // Additional tiny islands
+    position: [11, -1.2, 1],
+    color: "#2DD4BF",
+    radiusTop: 1.1,
+    radiusBottom: 0.8,
+    height: 0.42,
+    segments: 6,
+    bobSpeed: 0.62,
+    trees: [],
+    rocks: [{ pos: [0.25, 0, 0.2], scale: 0.45 }],
+  },
+  {
+    position: [0, -1.4, 10],
+    color: "#FBBF24",
+    radiusTop: 1,
+    radiusBottom: 0.75,
+    height: 0.4,
+    segments: 6,
+    bobSpeed: 0.58,
+    trees: [],
+    rocks: [],
+  },
+  {
+    position: [-11, -1.15, 0],
+    color: "#A78BFA",
+    radiusTop: 1.15,
+    radiusBottom: 0.82,
+    height: 0.44,
+    segments: 6,
+    bobSpeed: 0.63,
+    trees: [],
+    rocks: [{ pos: [0.2, 0, -0.2], scale: 0.4 }],
+  },
+  {
+    position: [8, -1.3, 9],
+    color: "#6EE7B7",
+    radiusTop: 0.95,
+    radiusBottom: 0.7,
+    height: 0.36,
+    segments: 6,
+    bobSpeed: 0.67,
+    trees: [],
+    rocks: [],
+  },
+  {
+    position: [-9, -1.35, 8],
+    color: "#FB7185",
+    radiusTop: 1,
+    radiusBottom: 0.72,
+    height: 0.38,
+    segments: 6,
+    bobSpeed: 0.64,
+    trees: [],
+    rocks: [],
+  },
+  {
+    position: [9, -1.25, -9],
+    color: "#7DD3FC",
+    radiusTop: 0.9,
+    radiusBottom: 0.65,
+    height: 0.34,
+    segments: 6,
+    bobSpeed: 0.7,
+    trees: [],
+    rocks: [],
+  },
+  {
+    position: [-10, -1.3, -9],
+    color: "#2DD4BF",
+    radiusTop: 1.05,
+    radiusBottom: 0.74,
+    height: 0.4,
+    segments: 6,
+    bobSpeed: 0.66,
+    trees: [],
+    rocks: [{ pos: [0.3, 0, 0], scale: 0.42 }],
   },
 ];
 
@@ -504,6 +582,34 @@ export function IslandWorld({
   myColor,
   onAvatarClick,
 }: IslandWorldProps) {
+  const centerIsland = ISLANDS[0];
+  const centerSurfaceY =
+    centerIsland.position[1] + (centerIsland.height ?? 1) / 2 + 0.5;
+  const remoteUsers = users.filter((u) => u.id !== myId);
+  const remoteAvatarPositions = useMemo(() => {
+    return remoteUsers.map((_, index) => {
+      const perRing = 8;
+      const ring = Math.floor(index / perRing);
+      const indexInRing = index % perRing;
+      const angle = (indexInRing / perRing) * Math.PI * 2 + ring * 0.35;
+      const radius = 1.8 + ring * 0.9;
+
+      return [
+        centerIsland.position[0] + Math.cos(angle) * radius,
+        centerSurfaceY,
+        centerIsland.position[2] + Math.sin(angle) * radius,
+      ] as [number, number, number];
+    });
+  }, [remoteUsers, centerIsland.position, centerSurfaceY]);
+
+  const localAvatarPosition: [number, number, number] = [
+    centerIsland.position[0],
+    centerSurfaceY,
+    centerIsland.position[2],
+  ];
+
+  void myPosition;
+
   return (
     <div className="w-full h-screen">
       <Canvas
@@ -555,7 +661,7 @@ export function IslandWorld({
 
         {/* ---- Local user avatar ---- */}
         <Avatar
-          position={myPosition}
+          position={localAvatarPosition}
           color={myColor}
           id={myId}
           isLocal
@@ -563,18 +669,16 @@ export function IslandWorld({
         />
 
         {/* ---- Remote user avatars ---- */}
-        {users
-          .filter((u) => u.id !== myId)
-          .map((user) => (
-            <Avatar
-              key={user.id}
-              position={[user.x, user.y, user.z]}
-              color={user.color}
-              id={user.id}
-              available={user.available}
-              onClick={() => onAvatarClick(user.id)}
-            />
-          ))}
+        {remoteUsers.map((user, index) => (
+          <Avatar
+            key={user.id}
+            position={remoteAvatarPositions[index]}
+            color={user.color}
+            id={user.id}
+            available={user.available}
+            onClick={() => onAvatarClick(user.id)}
+          />
+        ))}
 
         {/* ---- Ambient floating particles ---- */}
         <Particles count={60} />
