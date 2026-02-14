@@ -11,10 +11,21 @@ export default {
     const url = new URL(request.url);
 
     // CORS for dev
+    const allowedOrigins = [
+      "http://localhost:5173",
+      "https://p2p-chat-app-cloudflare-workers.pages.dev",
+    ];
+
+    const origin = request.headers.get("Origin");
+
+    const allowOrigin = allowedOrigins.includes(origin!)
+      ? origin
+      : "https://p2p-chat-app-cloudflare-workers.pages.dev";
+
     if (request.method === "OPTIONS") {
       return new Response(null, {
         headers: {
-          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Origin": allowOrigin!,
           "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type",
         },
