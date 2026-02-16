@@ -9,3 +9,8 @@ class_name = "World"
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["World"]
+
+[observability]
+[observability.logs]
+enabled = false
+invocation_logs = true
