@@ -41,6 +41,37 @@ function App() {
   const myPosition = useRef(randomPosition());
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isOfferer = useRef(false);
+  const reconnectingRef = useRef(false);
+  const joinSoundRef = useRef<HTMLAudioElement | null>(null);
+  const inviteSoundRef = useRef<HTMLAudioElement | null>(null);
+  const messageSoundRef = useRef<HTMLAudioElement | null>(null);
+  const lastMessageSoundAtRef = useRef(0);
+
+  const playSound = useCallback((audio: HTMLAudioElement | null) => {
+    if (!audio) return;
+    audio.currentTime = 0;
+    void audio.play().catch((err) => {
+      console.warn("[Sound] Playback blocked or failed:", err);
+    });
+  }, []);
+
+  useEffect(() => {
+    joinSoundRef.current = new Audio("/sounds/when_users_join.mp3");
+    inviteSoundRef.current = new Audio("/sounds/chat_invitation came.mp3");
+    messageSoundRef.current = new Audio("/sounds/message_recieve.mp3");
+
+    const allSounds = [
+      joinSoundRef.current,
+      inviteSoundRef.current,
+      messageSoundRef.current,
+    ];
+
+    for (const sound of allSounds) {
+      if (!sound) continue;
+      sound.preload = "auto";
+      sound.load();
+    }
+  }, []);
 
   const wsSend = useCallback((payload: Record<string, unknown>) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -62,26 +93,35 @@ function App() {
   }, []);
 
   /** Wire up DataChannel events (shared by offerer & answerer). */
-  const setupDataChannel = useCallback((dc: RTCDataChannel) => {
-    dcRef.current = dc;
+  const setupDataChannel = useCallback(
+    (dc: RTCDataChannel) => {
+      dcRef.current = dc;
 
-    dc.onopen = () => {
-      console.log("[WebRTC] DataChannel open");
-      setRtcStatus("connected");
-    };
+      dc.onopen = () => {
+        console.log("[WebRTC] DataChannel open");
+        setRtcStatus("connected");
+      };
 
-    dc.onclose = () => {
-      console.log("[WebRTC] DataChannel closed");
-      setRtcStatus("disconnected");
-    };
+      dc.onclose = () => {
+        console.log("[WebRTC] DataChannel closed");
+        setRtcStatus("disconnected");
+      };
 
-    dc.onmessage = (e) => {
-      setMessages((prev) => [
-        ...prev,
-        { from: "peer", text: e.data, timestamp: Date.now() },
-      ]);
-    };
-  }, []);
+      dc.onmessage = (e) => {
+        setMessages((prev) => [
+          ...prev,
+          { from: "peer", text: e.data, timestamp: Date.now() },
+        ]);
+
+        const now = Date.now();
+        if (now - lastMessageSoundAtRef.current > 250) {
+          playSound(messageSoundRef.current);
+          lastMessageSoundAtRef.current = now;
+        }
+      };
+    },
+    [playSound],
+  );
 
   /** Create a new peer connection and hook it up. */
   const createPeerConnection = useCallback(
@@ -244,6 +284,7 @@ function App() {
         // ── World presence ──
         case "world-state":
           setUsers(data.users);
+          reconnectingRef.current = false;
           break;
 
         case "user-joined":
@@ -251,6 +292,9 @@ function App() {
             ...prev.filter((u) => u.id !== data.user.id),
             data.user,
           ]);
+          if (!reconnectingRef.current) {
+            playSound(joinSoundRef.current);
+          }
           break;
 
         case "user-left":
@@ -271,6 +315,7 @@ function App() {
           // Ignore if already in a chat or handling another request
           if (view === "chat" || incomingRequest) break;
           setIncomingRequest(data.from);
+          playSound(inviteSoundRef.current);
           break;
 
         case "chat-response":
@@ -305,6 +350,7 @@ function App() {
       handleOffer,
       handleAnswer,
       handleIceCandidate,
+      playSound,
     ],
   );
 
@@ -348,6 +394,7 @@ function App() {
       setConnected(false);
       setIsConnecting(false);
       setUsers([]);
+      reconnectingRef.current = true;
       wsRef.current = null;
     };
 
