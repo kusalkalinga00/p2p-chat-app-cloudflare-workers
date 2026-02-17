@@ -9,6 +9,7 @@ import {
   OutgoingInvitationModal,
   IncomingInvitationModal,
 } from "./components/InvitationModal";
+import { WorldBot } from "./components/WorldBot";
 import { Wifi, WifiOff, Loader2, Users } from "lucide-react";
 import type { OutgoingStatus, User, View } from "./types/index.types";
 import {
@@ -32,6 +33,10 @@ function App() {
   const [chatTarget, setChatTarget] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [rtcStatus, setRtcStatus] = useState<RtcStatus>("disconnected");
+  const [isBotClosed, setIsBotClosed] = useState(false);
+  const [userChangeMessage, setUserChangeMessage] = useState<string | null>(
+    null,
+  );
 
   const wsRef = useRef<WebSocket | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -46,6 +51,10 @@ function App() {
   const inviteSoundRef = useRef<HTMLAudioElement | null>(null);
   const messageSoundRef = useRef<HTMLAudioElement | null>(null);
   const lastMessageSoundAtRef = useRef(0);
+  const prevWorldUserCountRef = useRef<number | null>(null);
+  const userChangeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
 
   const playSound = useCallback((audio: HTMLAudioElement | null) => {
     if (!audio) return;
@@ -72,6 +81,41 @@ function App() {
       sound.load();
     }
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (userChangeTimeoutRef.current)
+        clearTimeout(userChangeTimeoutRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (view !== "world" || !connected) return;
+
+    const currentCount = users.length;
+    const previousCount = prevWorldUserCountRef.current;
+
+    if (previousCount === null) {
+      prevWorldUserCountRef.current = currentCount;
+      return;
+    }
+
+    if (currentCount !== previousCount) {
+      setUserChangeMessage(
+        currentCount > previousCount
+          ? "A new user joined the island."
+          : "A user left the island.",
+      );
+
+      if (userChangeTimeoutRef.current)
+        clearTimeout(userChangeTimeoutRef.current);
+      userChangeTimeoutRef.current = setTimeout(() => {
+        setUserChangeMessage(null);
+      }, 2500);
+    }
+
+    prevWorldUserCountRef.current = currentCount;
+  }, [users.length, view, connected]);
 
   const wsSend = useCallback((payload: Record<string, unknown>) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -394,6 +438,8 @@ function App() {
       setConnected(false);
       setIsConnecting(false);
       setUsers([]);
+      setUserChangeMessage(null);
+      prevWorldUserCountRef.current = null;
       reconnectingRef.current = true;
       wsRef.current = null;
     };
@@ -487,6 +533,19 @@ function App() {
     ]);
   }, []);
 
+  const worldBotMessage = incomingRequest
+    ? "Someone invited you to chat. Accept or decline."
+    : outgoingStatus === "waiting"
+      ? "Invitation sent. Waiting for response..."
+      : outgoingStatus === "declined"
+        ? "Invitation declined. Try inviting someone else."
+        : outgoingStatus === "timeout"
+          ? "No response yet. You can try again."
+          : (userChangeMessage ??
+            "Click on another avatar to start a private chat.");
+
+  const showWorldBot = view === "world" && connected && !isBotClosed;
+
   if (!connected && view === "world") {
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6">
@@ -566,9 +625,6 @@ function App() {
         <p className="text-xs text-slate-500 font-mono mb-3">
           ID: {myId.current.slice(0, 8)}
         </p>
-        <p className="text-sm text-slate-600 mb-4">
-          Click on another avatar to chat
-        </p>
       </div>
 
       {/* User count */}
@@ -581,6 +637,13 @@ function App() {
           </span>
         </div>
       </div>
+
+      {showWorldBot && (
+        <WorldBot
+          message={worldBotMessage}
+          onClose={() => setIsBotClosed(true)}
+        />
+      )}
 
       {/* ── Outgoing invitation modal ── */}
       {outgoingTarget && (
