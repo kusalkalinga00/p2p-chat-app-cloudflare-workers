@@ -209,7 +209,12 @@ function App() {
   /** Create a new peer connection and hook it up. */
   const createPeerConnection = useCallback(
     (targetId: string) => {
+      // Candidates can arrive before the offer does. Hold on to them:
+      // cleanupRtc() below resets the queue, which would drop them.
+      const early = pendingCandidatesRef.current;
+
       cleanupRtc();
+      pendingCandidatesRef.current = early;
 
       const pc = new RTCPeerConnection(STUN_SERVERS);
       pcRef.current = pc;
@@ -320,9 +325,9 @@ function App() {
   const handleIceCandidate = useCallback(
     async (candidate: IceCandidate) => {
       const pc = pcRef.current;
-      if (!pc) return;
-
-      if (!pc.remoteDescription) {
+      if (!pc || !pc.remoteDescription) {
+        // No peer connection (yet) or no remote description to attach to —
+        // apply it once the offer/answer has been processed.
         pendingCandidatesRef.current.push(candidate);
         return;
       }
