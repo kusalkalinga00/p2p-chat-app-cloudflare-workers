@@ -1,35 +1,170 @@
+import type { IceConfigResponse, IceServer } from "@p2p-chat/types";
 import { World } from "./world";
 
 export { World };
 
+/**
+ * TURN configuration, all optional.
+ *
+ * - Production: set `TURN_KEY_ID` + `TURN_KEY_API_TOKEN` as Worker secrets and
+ *   the Worker mints short-lived credentials server-side. The TURN key is a
+ *   long-term secret that can mint unlimited credentials, so it must never
+ *   reach the browser.
+ * - Local development: set `TURN_URLS`, `TURN_USERNAME`, `TURN_PASSWORD` as
+ *   vars to point at a local coturn instance.
+ * - Neither: clients fall back to public STUN, which works on the same network
+ *   but not through symmetric NAT.
+ */
 export interface Env {
   WORLD: DurableObjectNamespace<World>;
+  ALLOWED_ORIGINS?: string;
+  TURN_KEY_ID?: string;
+  TURN_KEY_API_TOKEN?: string;
+  TURN_TTL_SECONDS?: string;
+  TURN_URLS?: string;
+  TURN_USERNAME?: string;
+  TURN_PASSWORD?: string;
+}
+
+const DEFAULT_ALLOWED_ORIGINS = [
+  "http://localhost:5173",
+  "http://localhost:5180",
+  "https://p2p-chat-app-cloudflare-workers.pages.dev",
+];
+
+/** Public STUN used when no TURN is configured. */
+const FALLBACK_ICE_SERVERS: IceServer[] = [
+  { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
+];
+
+const CLOUDFLARE_TURN_ENDPOINT = "https://rtc.live.cloudflare.com/v1/turn/keys";
+
+const DEFAULT_TURN_TTL_SECONDS = 86_400;
+
+/**
+ * Per-isolate cache of minted credentials. TURN credentials stay valid until
+ * their TTL and this Worker is the only caller of the mint endpoint, so caching
+ * avoids minting a fresh credential for every client load.
+ */
+let credentialCache: { expiresAt: number; body: IceConfigResponse } | null = null;
+
+function allowedOrigins(env: Env): string[] {
+  const configured = env.ALLOWED_ORIGINS?.split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  return configured?.length ? configured : DEFAULT_ALLOWED_ORIGINS;
+}
+
+function corsHeaders(request: Request, env: Env): Record<string, string> {
+  const origin = request.headers.get("Origin");
+  const allowed = allowedOrigins(env);
+  const allowOrigin = origin && allowed.includes(origin) ? origin : allowed[0];
+
+  return {
+    "Access-Control-Allow-Origin": allowOrigin,
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    // The allowlist varies per request, so caches must key on Origin.
+    Vary: "Origin",
+  };
+}
+
+/** Mint short-lived credentials from Cloudflare's TURN service. */
+async function mintCloudflareCredentials(
+  env: Env,
+): Promise<IceConfigResponse | null> {
+  const cached = credentialCache;
+  if (cached && cached.expiresAt > Date.now()) return cached.body;
+
+  const ttl = Number(env.TURN_TTL_SECONDS) || DEFAULT_TURN_TTL_SECONDS;
+
+  const response = await fetch(
+    `${CLOUDFLARE_TURN_ENDPOINT}/${env.TURN_KEY_ID}/credentials/generate-ice-servers`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.TURN_KEY_API_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ttl }),
+    },
+  );
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    console.error(
+      `[turn] credential mint failed: ${response.status} ${detail.slice(0, 200)}`,
+    );
+    return null;
+  }
+
+  const body = (await response.json()) as IceConfigResponse;
+  if (!Array.isArray(body.iceServers)) return null;
+
+  credentialCache = {
+    // Renew a minute early so a client never receives a dead credential.
+    expiresAt: Date.now() + Math.max(ttl - 60, 30) * 1000,
+    body: { ...body, ttl },
+  };
+
+  return credentialCache.body;
+}
+
+/** Static credentials, e.g. a local coturn using long-term auth. */
+function staticCredentials(env: Env): IceConfigResponse | null {
+  if (!env.TURN_URLS || !env.TURN_USERNAME || !env.TURN_PASSWORD) return null;
+
+  return {
+    iceServers: [
+      {
+        urls: env.TURN_URLS.split(",").map((url) => url.trim()),
+        username: env.TURN_USERNAME,
+        credential: env.TURN_PASSWORD,
+      },
+    ],
+  };
+}
+
+async function buildIceResponse(env: Env): Promise<IceConfigResponse> {
+  if (env.TURN_KEY_ID && env.TURN_KEY_API_TOKEN) {
+    const minted = await mintCloudflareCredentials(env);
+    // Fall through rather than breaking connections when minting fails.
+    if (minted) return minted;
+  }
+
+  const staticConfig = staticCredentials(env);
+  if (staticConfig) return staticConfig;
+
+  return { iceServers: FALLBACK_ICE_SERVERS };
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-
-    // CORS for dev
-    const allowedOrigins = [
-      "http://localhost:5173",
-      "https://p2p-chat-app-cloudflare-workers.pages.dev",
-    ];
-
-    const origin = request.headers.get("Origin");
-
-    const allowOrigin = allowedOrigins.includes(origin!)
-      ? origin
-      : "https://p2p-chat-app-cloudflare-workers.pages.dev";
+    const cors = corsHeaders(request, env);
 
     if (request.method === "OPTIONS") {
-      return new Response(null, {
+      return new Response(null, { headers: cors });
+    }
+
+    // ICE server configuration for the browser. Credentials are minted here so
+    // the TURN key never ships in the client bundle.
+    if (url.pathname === "/ice") {
+      const body = await buildIceResponse(env);
+
+      return Response.json(body, {
         headers: {
-          "Access-Control-Allow-Origin": allowOrigin!,
-          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
+          ...cors,
+          "Cache-Control": env.TURN_KEY_ID
+            ? "private, max-age=60"
+            : "public, max-age=300",
         },
       });
+    }
+
+    if (url.pathname === "/health") {
+      return Response.json({ ok: true }, { headers: cors });
     }
 
     // Route to Durable Object
@@ -40,6 +175,6 @@ export default {
       return world.fetch(request);
     }
 
-    return new Response("Not Found", { status: 404 });
+    return new Response("Not Found", { status: 404, headers: cors });
   },
 } satisfies ExportedHandler<Env>;

@@ -165,10 +165,62 @@ It covers presence, the invite handshake, relay authorization (an unpaired peer
 cannot push signaling at anyone), rejection of unknown message types, pairing
 release, and the reconnect/ghost-socket path.
 
+## TURN relay
+
+STUN only tells a peer its public address; it cannot help when the two peers
+cannot reach each other at all (symmetric NAT, most mobile carriers). A TURN
+server relays the traffic instead, at the cost of bandwidth through the relay.
+
+**Credentials never ship in the bundle.** The browser asks the Worker for its
+ICE configuration with `GET /ice`; the Worker mints short-lived TURN credentials
+and returns them. A TURN key can mint unlimited credentials, so it is kept as a
+Worker secret and never reaches the client.
+
+### Production (Cloudflare TURN)
+
+Create a TURN key at [dash.cloudflare.com → Realtime](https://dash.cloudflare.com/?to=/:account/calls),
+then store it as secrets:
+
+```bash
+cd apps/server
+pnpm wrangler secret put TURN_KEY_ID
+pnpm wrangler secret put TURN_KEY_API_TOKEN
+```
+
+Optional: `TURN_TTL_SECONDS` (default `86400`). Credentials are cached per
+isolate until a minute before they expire, so the mint endpoint is not called per
+visitor.
+
+Cloudflare TURN costs **$0.05/GB outbound** unless it is used together with the
+Realtime SFU, so it is worth watching usage on a busy island.
+
+### Local (coturn in Docker)
+
+`infra/turn/` runs coturn with long-term credentials for testing:
+
+```bash
+# TURN_EXTERNAL_IP must be an address peers can reach — your LAN IP, not
+# 127.0.0.1, because the relay socket lives inside the container network.
+TURN_EXTERNAL_IP=$(ipconfig getifaddr en0) \
+  docker compose -f infra/turn/docker-compose.yml up -d
+
+# Point the Worker at it (no secrets needed locally)
+cd apps/server
+pnpm wrangler dev \
+  --var TURN_URLS:"turn:$TURN_EXTERNAL_IP:3478?transport=udp" \
+  --var TURN_USERNAME:island --var TURN_PASSWORD:islanddev
+```
+
+Without any TURN configuration `/ice` still answers, with public STUN only, and
+the client falls back to STUN if the endpoint is unreachable — a broken Worker
+degrades connectivity rather than breaking it.
+
 ## Known limitations
 
-- **No TURN server.** ICE uses public STUN only, so peers behind symmetric NAT
-  (most mobile carriers) cannot connect. Adding a TURN relay is the next step for
-  real-world connectivity.
+- **Relay-to-relay is unverified locally.** With coturn in Docker and both peers
+  on the same host, the only peer address available is the TURN server's own
+  external address, which coturn refuses to relay to (loop protection). Relay
+  allocation itself is verified; a full media path through the relay needs two
+  peers on different networks.
 - World positions are assigned by the client and rendered by index on a ring;
   there is no movement or collision.
