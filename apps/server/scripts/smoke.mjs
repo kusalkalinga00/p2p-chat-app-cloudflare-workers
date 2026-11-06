@@ -97,8 +97,48 @@ function connect(id) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+const HTTP = ORIGIN.replace(/^ws/, "http");
+
+/** ICE configuration endpoint: what the browser uses to build its connection. */
+async function checkIceEndpoint() {
+  const response = await fetch(`${HTTP}/ice`, {
+    headers: { Origin: "http://localhost:5180" },
+  });
+  assert.equal(response.status, 200);
+
+  const body = await response.json();
+  assert.ok(Array.isArray(body.iceServers) && body.iceServers.length > 0);
+  assert.equal(
+    response.headers.get("access-control-allow-origin"),
+    "http://localhost:5180",
+  );
+  assert.match(response.headers.get("vary") ?? "", /Origin/i);
+  ok("/ice returns an ICE config with CORS for an allowed origin");
+
+  // An unknown origin must not be echoed back.
+  const foreign = await fetch(`${HTTP}/ice`, {
+    headers: { Origin: "https://evil.example" },
+  });
+  assert.notEqual(
+    foreign.headers.get("access-control-allow-origin"),
+    "https://evil.example",
+  );
+  ok("/ice does not reflect an unknown origin");
+
+  const health = await fetch(`${HTTP}/health`);
+  assert.equal(health.status, 200);
+  assert.equal((await health.json()).ok, true);
+  ok("/health responds");
+
+  const missing = await fetch(`${HTTP}/nope`);
+  assert.equal(missing.status, 404);
+  ok("unknown routes 404");
+}
+
 async function main() {
   console.log(`\nworld: ${ORIGIN}/world/${WORLD}\n`);
+
+  await checkIceEndpoint();
 
   const a = connect("user-a");
   await a.opened;

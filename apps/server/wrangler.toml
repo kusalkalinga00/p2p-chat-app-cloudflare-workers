@@ -14,3 +14,34 @@ new_sqlite_classes = ["World"]
 [observability.logs]
 enabled = false
 invocation_logs = true
+
+# ---------------------------------------------------------------------------
+# TURN / ICE configuration (all optional)
+# ---------------------------------------------------------------------------
+# The Worker serves GET /ice, which the browser uses to build its
+# RTCPeerConnection. Credentials are resolved server-side so nothing secret
+# ships in the client bundle.
+#
+# Production — Cloudflare TURN. Set these as secrets, never as vars:
+#
+#   wrangler secret put TURN_KEY_ID
+#   wrangler secret put TURN_KEY_API_TOKEN
+#
+# Create the key at https://dash.cloudflare.com/?to=/:account/calls. Optionally
+# set TURN_TTL_SECONDS (default 86400). TURN is billed at $0.05/GB outbound
+# unless used with the Realtime SFU.
+#
+# Local development — coturn in Docker (see infra/turn/). Either put the vars
+# below in [vars] for `wrangler dev`, or pass them per run:
+#
+#   wrangler dev --var TURN_URLS:"turn:192.168.1.20:3478?transport=udp" \
+#                --var TURN_USERNAME:island --var TURN_PASSWORD:islanddev
+#
+# [vars]
+# TURN_URLS = "turn:192.168.1.20:3478?transport=udp"
+# TURN_USERNAME = "island"
+# TURN_PASSWORD = "islanddev"
+#
+# Allowed browser origins for CORS (comma separated). Defaults to localhost
+# and the production Pages domain when unset.
+# ALLOWED_ORIGINS = "http://localhost:5180,https://example.pages.dev"

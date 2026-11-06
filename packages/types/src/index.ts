@@ -27,6 +27,20 @@ export interface SessionDescription {
   sdp: string;
 }
 
+/** ICE server entry, structurally compatible with `RTCIceServer`. */
+export interface IceServer {
+  urls: string | string[];
+  username?: string;
+  credential?: string;
+}
+
+/** Body of `GET /ice` — the ICE configuration the client should use. */
+export interface IceConfigResponse {
+  iceServers: IceServer[];
+  /** Seconds until short-lived credentials expire. */
+  ttl?: number;
+}
+
 /** ICE payload, structurally compatible with `RTCIceCandidateInit`. */
 export interface IceCandidate {
   candidate: string;

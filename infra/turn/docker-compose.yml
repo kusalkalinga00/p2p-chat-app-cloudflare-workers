@@ -1,0 +1,28 @@
+# Local TURN relay for verifying that peers connect when a direct path
+# is unavailable.
+#
+#   docker compose -f infra/turn/docker-compose.yml up -d
+#   docker compose -f infra/turn/docker-compose.yml logs -f
+#
+# Then point the Worker at it (see apps/server/wrangler.toml):
+#   TURN_URLS = "turn:127.0.0.1:3478?transport=udp"
+#   TURN_USERNAME = "island"
+#   TURN_PASSWORD = "islanddev"
+
+services:
+  turn:
+    image: coturn/coturn:4.6.3
+    container_name: island-turn
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "49160-49200:49160-49200/udp"
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+    # external-ip must be an address peers can reach. Override it when your
+    # LAN address differs: TURN_EXTERNAL_IP=192.168.1.20 docker compose up
+    command:
+      - "-c"
+      - "/etc/coturn/turnserver.conf"
+      - "--external-ip=${TURN_EXTERNAL_IP:-192.168.20.87}"
+    restart: unless-stopped

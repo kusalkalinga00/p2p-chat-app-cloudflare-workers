@@ -18,11 +18,8 @@ import type {
   User,
   View,
 } from "@p2p-chat/types";
-import {
-  INVITATION_TIMEOUT_MS,
-  STUN_SERVERS,
-  WORLD_WSS_URL,
-} from "./lib/constants";
+import { INVITATION_TIMEOUT_MS, WORLD_WSS_URL } from "./lib/constants";
+import { getIceConfig, prefetchIceConfig } from "./lib/ice";
 import { randomColor, randomPosition } from "./lib/utils";
 
 /** Close code the server uses when a newer connection claims our ID. */
@@ -208,7 +205,7 @@ function App() {
 
   /** Create a new peer connection and hook it up. */
   const createPeerConnection = useCallback(
-    (targetId: string) => {
+    (targetId: string, config: RTCConfiguration) => {
       // Candidates can arrive before the offer does. Hold on to them:
       // cleanupRtc() below resets the queue, which would drop them.
       const early = pendingCandidatesRef.current;
@@ -216,7 +213,7 @@ function App() {
       cleanupRtc();
       pendingCandidatesRef.current = early;
 
-      const pc = new RTCPeerConnection(STUN_SERVERS);
+      const pc = new RTCPeerConnection(config);
       pcRef.current = pc;
       setRtcStatus("connecting");
 
@@ -254,7 +251,8 @@ function App() {
   /** Offerer: create offer and send it. */
   const startOffer = useCallback(
     async (targetId: string) => {
-      const pc = createPeerConnection(targetId);
+      const config = await getIceConfig();
+      const pc = createPeerConnection(targetId, config);
 
       // Offerer creates the DataChannel
       const dc = pc.createDataChannel("chat");
@@ -283,7 +281,8 @@ function App() {
   /** Answerer: handle the incoming offer, create answer. */
   const handleOffer = useCallback(
     async (fromId: string, offer: SessionDescription) => {
-      const pc = createPeerConnection(fromId);
+      const config = await getIceConfig();
+      const pc = createPeerConnection(fromId, config);
 
       await pc.setRemoteDescription(offer);
       // Candidates that raced ahead of the offer can be applied now.
@@ -529,6 +528,10 @@ function App() {
       attemptRef.current = 0;
       setConnected(true);
       setIsConnecting(false);
+
+      // Resolve ICE servers (TURN credentials) while the user is still
+      // looking at the world, so joining a chat is instant.
+      prefetchIceConfig();
 
       ws.send(
         JSON.stringify({
