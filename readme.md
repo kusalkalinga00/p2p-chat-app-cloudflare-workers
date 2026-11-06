@@ -93,6 +93,7 @@ This runs client and server in parallel using workspace scripts.
 
 ### Root
 
+- `pnpm check` — what CI runs: shared types, worker types, client lint, build
 - `pnpm dev` — run all apps in dev mode
 - `pnpm build` — build client and run server type checks
 - `pnpm deploy` — deploy server (Cloudflare Worker)

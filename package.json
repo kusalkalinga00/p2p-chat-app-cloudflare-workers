@@ -2,8 +2,10 @@
   "name": "p2p-chat",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@11.7.0",
   "scripts": {
     "dev": "pnpm --parallel dev",
+    "check": "pnpm --filter @p2p-chat/types typecheck && pnpm --filter server types && pnpm --filter client lint && pnpm build",
     "build": "pnpm --filter client build && pnpm --filter server build",
     "deploy": "pnpm --filter server deploy",
     "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules pnpm-lock.yaml"

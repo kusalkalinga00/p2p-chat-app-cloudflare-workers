@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Types, lint, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck shared protocol
+        run: pnpm --filter @p2p-chat/types typecheck
+
+      - name: Typecheck worker
+        run: pnpm --filter server types
+
+      - name: Lint client
+        run: pnpm --filter client lint
+
+      - name: Build
+        run: pnpm build
+
+  protocol:
+    name: Durable Object smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Start wrangler dev
+        run: |
+          pnpm --filter server dev > /tmp/wrangler.log 2>&1 &
+          echo $! > /tmp/wrangler.pid
+          for i in $(seq 1 60); do
+            if curl -s -o /dev/null http://127.0.0.1:8787/world/ci; then
+              echo "worker is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "worker never became ready"
+          cat /tmp/wrangler.log
+          exit 1
+
+      - name: Run protocol smoke test
+        run: pnpm --filter server smoke
+
+      - name: Wrangler log
+        if: always()
+        run: cat /tmp/wrangler.log
+
+      - name: Stop wrangler
+        if: always()
+        run: kill "$(cat /tmp/wrangler.pid)" 2>/dev/null || true
