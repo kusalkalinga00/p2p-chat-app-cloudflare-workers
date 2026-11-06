@@ -1,17 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { Send, LogOut, Wifi, WifiOff, Loader2 } from "lucide-react";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-export interface ChatMessage {
-  from: "me" | "peer";
-  text: string;
-  timestamp: number;
-}
-
-export type RtcStatus = "connecting" | "connected" | "disconnected" | "failed";
+import type { ChatMessage, RtcStatus } from "@p2p-chat/types";
 
 interface PrivateChatProps {
   peerId: string;
@@ -132,9 +121,9 @@ export function PrivateChat({
           </div>
         )}
 
-        {messages.map((msg, i) => (
+        {messages.map((msg) => (
           <div
-            key={i}
+            key={msg.id}
             className={`flex ${msg.from === "me" ? "justify-end" : "justify-start"}`}
           >
             <div

@@ -1,23 +1,34 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { IslandWorld } from "./components/IslandWorld";
-import {
-  PrivateChat,
-  type ChatMessage,
-  type RtcStatus,
-} from "./components/PrivateChat";
+import { PrivateChat } from "./components/PrivateChat";
 import {
   OutgoingInvitationModal,
   IncomingInvitationModal,
 } from "./components/InvitationModal";
 import { WorldBot } from "./components/WorldBot";
 import { Wifi, WifiOff, Loader2, Users } from "lucide-react";
-import type { OutgoingStatus, User, View } from "./types/index.types";
+import type {
+  ChatMessage,
+  ClientMessage,
+  IceCandidate,
+  OutgoingStatus,
+  RtcStatus,
+  ServerMessage,
+  SessionDescription,
+  User,
+  View,
+} from "@p2p-chat/types";
 import {
   INVITATION_TIMEOUT_MS,
   STUN_SERVERS,
   WORLD_WSS_URL,
 } from "./lib/constants";
 import { randomColor, randomPosition } from "./lib/utils";
+
+/** Close code the server uses when a newer connection claims our ID. */
+const CLOSE_REPLACED = 4001;
+
+const MAX_RECONNECT_DELAY_MS = 8_000;
 
 function App() {
   const [connected, setConnected] = useState(false);
@@ -37,24 +48,40 @@ function App() {
   const [userChangeMessage, setUserChangeMessage] = useState<string | null>(
     null,
   );
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // Identity is generated once per page load and never read during render
+  // from a mutable ref.
+  const [identity] = useState(() => ({
+    id: crypto.randomUUID(),
+    color: randomColor(),
+    position: randomPosition(),
+  }));
 
   const wsRef = useRef<WebSocket | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
-  const myId = useRef(crypto.randomUUID());
-  const myColor = useRef(randomColor());
-  const myPosition = useRef(randomPosition());
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isOfferer = useRef(false);
   const reconnectingRef = useRef(false);
   const joinSoundRef = useRef<HTMLAudioElement | null>(null);
   const inviteSoundRef = useRef<HTMLAudioElement | null>(null);
   const messageSoundRef = useRef<HTMLAudioElement | null>(null);
   const lastMessageSoundAtRef = useRef(0);
-  const prevWorldUserCountRef = useRef<number | null>(null);
   const userChangeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+
+  /** ICE candidates that arrived before the remote description was set. */
+  const pendingCandidatesRef = useRef<IceCandidate[]>([]);
+
+  const shouldReconnectRef = useRef(true);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const attemptRef = useRef(0);
+  const viewRef = useRef<View>("world");
+
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
 
   const playSound = useCallback((audio: HTMLAudioElement | null) => {
     if (!audio) return;
@@ -86,38 +113,27 @@ function App() {
     return () => {
       if (userChangeTimeoutRef.current)
         clearTimeout(userChangeTimeoutRef.current);
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
     };
   }, []);
 
-  useEffect(() => {
-    if (view !== "world" || !connected) return;
+  /**
+   * Flash a transient world notice. Driven by the actual join/leave event
+   * rather than by diffing the user count in an effect.
+   */
+  const showUserChange = useCallback((message: string) => {
+    if (viewRef.current !== "world") return;
 
-    const currentCount = users.length;
-    const previousCount = prevWorldUserCountRef.current;
+    setUserChangeMessage(message);
+    if (userChangeTimeoutRef.current)
+      clearTimeout(userChangeTimeoutRef.current);
+    userChangeTimeoutRef.current = setTimeout(() => {
+      setUserChangeMessage(null);
+    }, 2500);
+  }, []);
 
-    if (previousCount === null) {
-      prevWorldUserCountRef.current = currentCount;
-      return;
-    }
-
-    if (currentCount !== previousCount) {
-      setUserChangeMessage(
-        currentCount > previousCount
-          ? "A new user joined the island."
-          : "A user left the island.",
-      );
-
-      if (userChangeTimeoutRef.current)
-        clearTimeout(userChangeTimeoutRef.current);
-      userChangeTimeoutRef.current = setTimeout(() => {
-        setUserChangeMessage(null);
-      }, 2500);
-    }
-
-    prevWorldUserCountRef.current = currentCount;
-  }, [users.length, view, connected]);
-
-  const wsSend = useCallback((payload: Record<string, unknown>) => {
+  const wsSend = useCallback((payload: ClientMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(payload));
     }
@@ -129,11 +145,29 @@ function App() {
 
   /** Tear down the RTCPeerConnection & DataChannel cleanly. */
   const cleanupRtc = useCallback(() => {
+    pendingCandidatesRef.current = [];
     dcRef.current?.close();
     dcRef.current = null;
     pcRef.current?.close();
     pcRef.current = null;
     setRtcStatus("disconnected");
+  }, []);
+
+  /**
+   * Apply candidates that arrived before `setRemoteDescription`.
+   * Dropping them is the classic cause of "connects for me, not for you".
+   */
+  const flushPendingCandidates = useCallback(async (pc: RTCPeerConnection) => {
+    const queued = pendingCandidatesRef.current;
+    pendingCandidatesRef.current = [];
+
+    for (const candidate of queued) {
+      try {
+        await pc.addIceCandidate(candidate);
+      } catch (err) {
+        console.warn("[WebRTC] Failed to add queued ICE candidate:", err);
+      }
+    }
   }, []);
 
   /** Wire up DataChannel events (shared by offerer & answerer). */
@@ -154,7 +188,12 @@ function App() {
       dc.onmessage = (e) => {
         setMessages((prev) => [
           ...prev,
-          { from: "peer", text: e.data, timestamp: Date.now() },
+          {
+            id: crypto.randomUUID(),
+            from: "peer",
+            text: String(e.data),
+            timestamp: Date.now(),
+          },
         ]);
 
         const now = Date.now();
@@ -178,11 +217,13 @@ function App() {
 
       // Relay ICE candidates via the World DO
       pc.onicecandidate = (e) => {
-        if (e.candidate) {
+        const json = e.candidate?.toJSON();
+        // `candidate` is optional in the DOM type but required by us.
+        if (json?.candidate) {
           wsSend({
             type: "rtc-ice-candidate",
             target: targetId,
-            payload: e.candidate.toJSON(),
+            payload: { ...json, candidate: json.candidate },
           });
         }
       };
@@ -217,10 +258,16 @@ function App() {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
+      const sdp = pc.localDescription?.sdp;
+      if (!sdp) {
+        setRtcStatus("failed");
+        return;
+      }
+
       wsSend({
         type: "rtc-offer",
         target: targetId,
-        payload: pc.localDescription!.toJSON(),
+        payload: { type: "offer", sdp } satisfies SessionDescription,
       });
 
       console.log("[WebRTC] Sent offer to", targetId);
@@ -230,42 +277,58 @@ function App() {
 
   /** Answerer: handle the incoming offer, create answer. */
   const handleOffer = useCallback(
-    async (fromId: string, offer: RTCSessionDescriptionInit) => {
+    async (fromId: string, offer: SessionDescription) => {
       const pc = createPeerConnection(fromId);
 
-      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      await pc.setRemoteDescription(offer);
+      // Candidates that raced ahead of the offer can be applied now.
+      await flushPendingCandidates(pc);
+
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
+
+      const sdp = pc.localDescription?.sdp;
+      if (!sdp) {
+        setRtcStatus("failed");
+        return;
+      }
 
       wsSend({
         type: "rtc-answer",
         target: fromId,
-        payload: pc.localDescription!.toJSON(),
+        payload: { type: "answer", sdp } satisfies SessionDescription,
       });
 
       console.log("[WebRTC] Sent answer to", fromId);
     },
-    [createPeerConnection, wsSend],
+    [createPeerConnection, flushPendingCandidates, wsSend],
   );
 
   /** Offerer: handle the returned answer. */
   const handleAnswer = useCallback(
-    async (answer: RTCSessionDescriptionInit) => {
+    async (answer: SessionDescription) => {
       const pc = pcRef.current;
       if (!pc) return;
-      await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      await pc.setRemoteDescription(answer);
+      await flushPendingCandidates(pc);
       console.log("[WebRTC] Remote description set (answer)");
     },
-    [],
+    [flushPendingCandidates],
   );
 
-  /** Both sides: add ICE candidate. */
+  /** Both sides: add ICE candidate, queueing if the description is missing. */
   const handleIceCandidate = useCallback(
-    async (candidate: RTCIceCandidateInit) => {
+    async (candidate: IceCandidate) => {
       const pc = pcRef.current;
       if (!pc) return;
+
+      if (!pc.remoteDescription) {
+        pendingCandidatesRef.current.push(candidate);
+        return;
+      }
+
       try {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        await pc.addIceCandidate(candidate);
       } catch (err) {
         console.warn("[WebRTC] Failed to add ICE candidate:", err);
       }
@@ -285,22 +348,20 @@ function App() {
       setIncomingRequest(null);
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
 
-      // Mark ourselves as unavailable so no one else can invite us
-      wsSend({ type: "set-available", available: false });
+      // The server marks both users unavailable when it pairs them, so
+      // there is nothing to announce here.
 
-      // Set chat state
       setChatTarget(peerId);
       setMessages([]);
-      isOfferer.current = offerer;
       setView("chat");
 
       // The offerer kicks off WebRTC negotiations
       if (offerer) {
-        startOffer(peerId);
+        void startOffer(peerId);
       }
       // (The answerer waits for the rtc-offer message, handled in handleMessage)
     },
-    [startOffer, wsSend],
+    [startOffer],
   );
 
   // ────────────────────────────────────────────────────────────────
@@ -313,9 +374,9 @@ function App() {
     setMessages([]);
     setView("world");
 
-    // Mark ourselves as available again — keep the WebSocket open
-    // so there's no reconnect race condition.
-    wsSend({ type: "set-available", available: true });
+    // Tell the server to release the pairing (and the peer) so we become
+    // available again and nobody is left talking to a closed channel.
+    wsSend({ type: "chat-leave" });
   }, [cleanupRtc, wsSend]);
 
   // ────────────────────────────────────────────────────────────────
@@ -323,7 +384,7 @@ function App() {
   // ────────────────────────────────────────────────────────────────
 
   const handleMessage = useCallback(
-    (data: Record<string, any>) => {
+    (data: ServerMessage) => {
       switch (data.type) {
         // ── World presence ──
         case "world-state":
@@ -338,11 +399,15 @@ function App() {
           ]);
           if (!reconnectingRef.current) {
             playSound(joinSoundRef.current);
+            showUserChange("A new user joined the island.");
           }
           break;
 
         case "user-left":
           setUsers((prev) => prev.filter((u) => u.id !== data.id));
+          if (!reconnectingRef.current) {
+            showUserChange("A user left the island.");
+          }
           break;
 
         // ── World availability ──
@@ -362,6 +427,12 @@ function App() {
           playSound(inviteSoundRef.current);
           break;
 
+        case "chat-cancelled":
+          setIncomingRequest((current) =>
+            current === data.from ? null : current,
+          );
+          break;
+
         case "chat-response":
           if (timeoutRef.current) clearTimeout(timeoutRef.current);
 
@@ -375,26 +446,46 @@ function App() {
 
         // ── WebRTC signaling relay ──
         case "rtc-offer":
-          handleOffer(data.from, data.payload);
+          void handleOffer(data.from, data.payload);
           break;
 
         case "rtc-answer":
-          handleAnswer(data.payload);
+          void handleAnswer(data.payload);
           break;
 
         case "rtc-ice-candidate":
-          handleIceCandidate(data.payload);
+          void handleIceCandidate(data.payload);
+          break;
+
+        case "peer-left":
+          if (chatTarget === data.id) {
+            cleanupRtc();
+            setChatTarget(null);
+            setMessages([]);
+            setView("world");
+            setNotice("Your chat partner disconnected.");
+            wsSend({ type: "chat-leave" });
+          }
+          break;
+
+        case "error":
+          console.warn(`[server] ${data.code}: ${data.message}`);
+          setNotice(data.message);
           break;
       }
     },
     [
       view,
       incomingRequest,
+      chatTarget,
       enterChat,
       handleOffer,
       handleAnswer,
       handleIceCandidate,
+      cleanupRtc,
       playSound,
+      showUserChange,
+      wsSend,
     ],
   );
 
@@ -408,59 +499,99 @@ function App() {
   // Connect to world WebSocket
   // ────────────────────────────────────────────────────────────────
 
+  const connectRef = useRef<() => void>(() => {});
+
   const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    const existing = wsRef.current;
+    if (
+      existing &&
+      (existing.readyState === WebSocket.OPEN ||
+        existing.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
+
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
 
     setIsConnecting(true);
-    const ws = new WebSocket(`${WORLD_WSS_URL}/world/world?id=${myId.current}`);
+    const ws = new WebSocket(`${WORLD_WSS_URL}/world/world?id=${identity.id}`);
+    wsRef.current = ws;
 
     ws.onopen = () => {
+      attemptRef.current = 0;
       setConnected(true);
       setIsConnecting(false);
+
       ws.send(
         JSON.stringify({
           type: "spawn",
-          x: myPosition.current[0],
-          y: myPosition.current[1],
-          z: myPosition.current[2],
-          color: myColor.current,
-          available: true,
-        }),
+          x: identity.position[0],
+          y: identity.position[1],
+          z: identity.position[2],
+          color: identity.color,
+          // Coming back mid-chat: stay hidden from invites.
+          available: viewRef.current === "world",
+        } satisfies ClientMessage),
       );
     };
 
     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+      let data: ServerMessage;
+      try {
+        data = JSON.parse(event.data as string) as ServerMessage;
+      } catch {
+        console.warn("[ws] Ignoring non-JSON frame");
+        return;
+      }
       handleMessageRef.current(data);
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       setConnected(false);
       setIsConnecting(false);
       setUsers([]);
       setUserChangeMessage(null);
-      prevWorldUserCountRef.current = null;
       reconnectingRef.current = true;
       wsRef.current = null;
+
+      // Another tab claimed our ID — do not fight it.
+      if (event.code === CLOSE_REPLACED) return;
+      if (!shouldReconnectRef.current) return;
+
+      const delay = Math.min(
+        500 * 2 ** attemptRef.current,
+        MAX_RECONNECT_DELAY_MS,
+      );
+      attemptRef.current += 1;
+
+      reconnectTimerRef.current = setTimeout(() => {
+        if (shouldReconnectRef.current) connectRef.current();
+      }, delay);
     };
 
     ws.onerror = (err) => {
       console.error("WebSocket error:", err);
       setIsConnecting(false);
     };
+  }, [identity]);
 
-    wsRef.current = ws;
-  }, [WORLD_WSS_URL]);
-
-  // Auto-reconnect only on unexpected disconnect (e.g. server restart).
-  // We no longer close the WS when entering/leaving chat.
   useEffect(() => {
-    if (view === "world" && !connected && !isConnecting && !wsRef.current) {
-      // Small delay so the previous socket finishes closing
-      const t = setTimeout(connect, 300);
-      return () => clearTimeout(t);
-    }
-  }, [view, connected, isConnecting, connect]);
+    connectRef.current = connect;
+  }, [connect]);
+
+  // Close the socket when the component unmounts (and stop retrying).
+  useEffect(() => {
+    shouldReconnectRef.current = true;
+    return () => {
+      shouldReconnectRef.current = false;
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      wsRef.current?.close();
+      wsRef.current = null;
+    };
+  }, []);
 
   // ────────────────────────────────────────────────────────────────
   // Invitation actions
@@ -480,26 +611,32 @@ function App() {
   /** User confirmed "Send Request" in the outgoing modal. */
   const sendInvitation = useCallback(() => {
     if (!outgoingTarget) return;
-    wsSend({ type: "chat-request", target: outgoingTarget });
+    const target = outgoingTarget;
+    wsSend({ type: "chat-request", target });
     setOutgoingStatus("waiting");
 
-    // Start 15 s timeout
+    // Start the invitation timeout; withdraw the request when it fires so
+    // the other side's modal does not linger.
     timeoutRef.current = setTimeout(() => {
       setOutgoingStatus("timeout");
+      wsSend({ type: "chat-cancel", target });
     }, INVITATION_TIMEOUT_MS);
   }, [outgoingTarget, wsSend]);
 
   /** Dismiss outgoing modal (cancel / close after timeout). */
   const cancelOutgoing = useCallback(() => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    if (outgoingTarget && outgoingStatus === "waiting") {
+      wsSend({ type: "chat-cancel", target: outgoingTarget });
+    }
     setOutgoingTarget(null);
     setOutgoingStatus("idle");
-  }, []);
+  }, [outgoingTarget, outgoingStatus, wsSend]);
 
   /** User accepted an incoming request. */
   const acceptIncoming = useCallback(() => {
     if (!incomingRequest) return;
-    const roomId = [myId.current, incomingRequest].sort().join("-");
+    const roomId = [identity.id, incomingRequest].sort().join("-");
     wsSend({
       type: "chat-response",
       target: incomingRequest,
@@ -508,7 +645,7 @@ function App() {
     });
     // Answerer enters chat (will receive rtc-offer shortly)
     enterChat(incomingRequest, false);
-  }, [incomingRequest, wsSend, enterChat]);
+  }, [identity.id, incomingRequest, wsSend, enterChat]);
 
   /** User declined an incoming request. */
   const declineIncoming = useCallback(() => {
@@ -529,20 +666,22 @@ function App() {
     dc.send(text);
     setMessages((prev) => [
       ...prev,
-      { from: "me", text, timestamp: Date.now() },
+      { id: crypto.randomUUID(), from: "me", text, timestamp: Date.now() },
     ]);
   }, []);
 
-  const worldBotMessage = incomingRequest
-    ? "Someone invited you to chat. Accept or decline."
-    : outgoingStatus === "waiting"
-      ? "Invitation sent. Waiting for response..."
-      : outgoingStatus === "declined"
-        ? "Invitation declined. Try inviting someone else."
-        : outgoingStatus === "timeout"
-          ? "No response yet. You can try again."
-          : (userChangeMessage ??
-            "Click on another avatar to start a private chat.");
+  const worldBotMessage = notice
+    ? notice
+    : incomingRequest
+      ? "Someone invited you to chat. Accept or decline."
+      : outgoingStatus === "waiting"
+        ? "Invitation sent. Waiting for response..."
+        : outgoingStatus === "declined"
+          ? "Invitation declined. Try inviting someone else."
+          : outgoingStatus === "timeout"
+            ? "No response yet. You can try again."
+            : (userChangeMessage ??
+              "Click on another avatar to start a private chat.");
 
   const showWorldBot = view === "world" && connected && !isBotClosed;
 
@@ -610,9 +749,9 @@ function App() {
       {/* 3D World */}
       <IslandWorld
         users={users}
-        myId={myId.current}
-        myPosition={myPosition.current}
-        myColor={myColor.current}
+        myId={identity.id}
+        myPosition={identity.position}
+        myColor={identity.color}
         onAvatarClick={handleAvatarClick}
       />
 
@@ -623,7 +762,7 @@ function App() {
           <span className="font-semibold text-slate-800">Connected</span>
         </div>
         <p className="text-xs text-slate-500 font-mono mb-3">
-          ID: {myId.current.slice(0, 8)}
+          ID: {identity.id.slice(0, 8)}
         </p>
       </div>
 
@@ -641,7 +780,10 @@ function App() {
       {showWorldBot && (
         <WorldBot
           message={worldBotMessage}
-          onClose={() => setIsBotClosed(true)}
+          onClose={() => {
+            setIsBotClosed(true);
+            setNotice(null);
+          }}
         />
       )}
 

@@ -7,4 +7,9 @@ export const STUN_SERVERS: RTCConfiguration = {
 
 export const INVITATION_TIMEOUT_MS = 15_000;
 
-export const WORLD_WSS_URL = import.meta.env.VITE_WORLD_WSS_URL;
+/**
+ * Worker origin. `http(s)://` is fine — `new WebSocket()` upgrades it to
+ * `ws(s)://` — and it keeps dev and prod pointing at the same shape of URL.
+ */
+export const WORLD_WSS_URL: string =
+  import.meta.env.VITE_WORLD_WSS_URL ?? "http://localhost:8787";

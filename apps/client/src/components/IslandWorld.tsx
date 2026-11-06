@@ -1,21 +1,27 @@
 import { useRef, useMemo, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls, Text } from "@react-three/drei";
-// @ts-ignore – three ships JS-only; types resolved via @react-three/fiber
 import * as THREE from "three";
+import type { User } from "@p2p-chat/types";
 
 // ---------------------------------------------------------------------------
-// Types
+// Deterministic-per-load randomness
 // ---------------------------------------------------------------------------
+// Computed once at module scope so no component render is impure.
 
-interface User {
-  id: string;
-  x: number;
-  y: number;
-  z: number;
-  color: string;
-  available: boolean;
-}
+/** Per-vertex wave phase for the ocean plane (81 × 81 vertices). */
+const OCEAN_PHASES = Float32Array.from({ length: 81 * 81 }, () =>
+  Math.random() * Math.PI * 2,
+);
+
+/** Ambient particle field parameters. */
+const PARTICLES = Array.from({ length: 60 }, () => ({
+  x: (Math.random() - 0.5) * 40,
+  y: Math.random() * 8 + 1,
+  z: (Math.random() - 0.5) * 40,
+  speed: 0.3 + Math.random() * 0.5,
+  phase: Math.random() * Math.PI * 2,
+}));
 
 interface IslandWorldProps {
   users: User[];
@@ -33,14 +39,6 @@ interface IslandWorldProps {
 function Ocean() {
   const meshRef = useRef<THREE.Mesh>(null);
 
-  // Pre-compute per-vertex phase offsets so waves look organic
-  const phases = useMemo(() => {
-    const count = 80 * 80; // segments + 1 vertices per axis → positions / 3
-    const arr = new Float32Array(count);
-    for (let i = 0; i < count; i++) arr[i] = Math.random() * Math.PI * 2;
-    return arr;
-  }, []);
-
   useFrame(({ clock }) => {
     if (!meshRef.current) return;
     const geo = meshRef.current.geometry as THREE.PlaneGeometry;
@@ -53,7 +51,8 @@ function Ocean() {
       // Small wave displacement on the Z axis (plane is rotated -90° on X)
       pos.setZ(
         i,
-        Math.sin(x * 0.3 + t * 0.6 + phases[i % phases.length]) * 0.15 +
+        Math.sin(x * 0.3 + t * 0.6 + OCEAN_PHASES[i % OCEAN_PHASES.length]) *
+          0.15 +
           Math.cos(y * 0.25 + t * 0.4) * 0.1,
       );
     }
@@ -359,20 +358,7 @@ function Particles({ count = 60 }: { count?: number }) {
   const ref = useRef<THREE.InstancedMesh>(null);
   const dummy = useMemo(() => new THREE.Object3D(), []);
 
-  // Pre-compute random positions and phase offsets
-  const data = useMemo(() => {
-    const arr = [];
-    for (let i = 0; i < count; i++) {
-      arr.push({
-        x: (Math.random() - 0.5) * 40,
-        y: Math.random() * 8 + 1,
-        z: (Math.random() - 0.5) * 40,
-        speed: 0.3 + Math.random() * 0.5,
-        phase: Math.random() * Math.PI * 2,
-      });
-    }
-    return arr;
-  }, [count]);
+  const data = useMemo(() => PARTICLES.slice(0, count), [count]);
 
   useFrame(({ clock }) => {
     if (!ref.current) return;

@@ -1,4 +1,5 @@
 import { Loader2 } from "lucide-react";
+import type { OutgoingStatus } from "@p2p-chat/types";
 
 // ---------------------------------------------------------------------------
 // Outgoing invitation modal – shown after clicking an avatar
@@ -7,7 +8,7 @@ import { Loader2 } from "lucide-react";
 interface OutgoingModalProps {
   targetId: string;
   /** "idle" = confirm screen, "waiting" = sent & awaiting reply, "timeout" = expired */
-  status: "idle" | "waiting" | "timeout" | "declined";
+  status: OutgoingStatus;
   onSend: () => void;
   onCancel: () => void;
 }
