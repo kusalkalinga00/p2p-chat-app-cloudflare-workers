@@ -284,9 +284,9 @@ function buildIsland(
     foamPositions.push(Math.cos(angle) * base, WATER_Y + 0.05, Math.sin(angle) * base);
     outer.push(foamPositions.length / 3);
     foamPositions.push(
-      Math.cos(angle) * base * 1.09,
+      Math.cos(angle) * base * 1.16,
       WATER_Y + 0.05,
-      Math.sin(angle) * base * 1.09,
+      Math.sin(angle) * base * 1.16,
     );
   }
   for (let i = 0; i < segments * 4; i++) {
@@ -667,9 +667,9 @@ function Island({ config }: { config: IslandConfig }) {
           looks cut out of the water. */}
       <mesh geometry={geometry.foam}>
         <meshBasicMaterial
-          color="#dcf3ec"
+          color="#eafaf4"
           transparent
-          opacity={0.55}
+          opacity={0.72}
           side={THREE.DoubleSide}
           depthWrite={false}
         />
