@@ -333,12 +333,12 @@ function Avatar({
       <Html
         center
         position={[0, 0.68, 0]}
-        distanceFactor={9}
+        distanceFactor={11}
         zIndexRange={[10, 0]}
         style={{ pointerEvents: "none" }}
       >
         <span
-          className={`whitespace-nowrap rounded-full border-2 border-ink px-2 py-0.5 text-[10px] font-extrabold tracking-tight shadow-[2px_2px_0_var(--color-ink)] ${
+          className={`whitespace-nowrap rounded-full border-2 border-ink px-3 py-1 text-[12px] font-extrabold tracking-tight shadow-[2px_2px_0_var(--color-ink)] ${
             isLocal ? "bg-mustard text-ink" : "bg-cream text-ink"
           }`}
         >
