@@ -337,6 +337,7 @@ function Avatar({
         {isLocal ? "You" : id.slice(0, 6)}
       </Text>
 
+
       {/* Availability status dot */}
       <mesh position={[0, 0.95, 0]}>
         <sphereGeometry args={[0.06, 8, 8]} />
