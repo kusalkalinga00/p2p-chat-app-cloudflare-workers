@@ -1,4 +1,4 @@
-import { useRef, useMemo, useState } from "react";
+import { useLayoutEffect, useRef, useMemo, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { Html, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
@@ -22,6 +22,112 @@ const PARTICLES = Array.from({ length: 60 }, () => ({
   speed: 0.3 + Math.random() * 0.5,
   phase: Math.random() * Math.PI * 2,
 }));
+
+// ---------------------------------------------------------------------------
+// Art direction: one pen, flat fills
+// ---------------------------------------------------------------------------
+//
+// The world is drawn with the same pen as the UI: hard ink outlines, flat
+// fills from the same five colours, hard-edged shadows, no glow. Every
+// surface is a MeshToonMaterial lit through a three-step ramp, so it resolves
+// into flat bands instead of a smooth gradient — a gradient is the one thing
+// the rest of the interface never does.
+
+const INK = "#171310";
+const CREAM = "#fff9f0";
+const CORAL = "#ff5a36";
+const MUSTARD = "#ffc145";
+const TEAL = "#1f9d8b";
+
+// Tints used for large 3D surfaces, where the full-strength colours would
+// swallow the outline drawn around them.
+const SAND = "#ffd98a";
+const SAND_LIGHT = "#ffe7b8";
+const WATER = "#57c4b6";
+const FOLIAGE = "#17776a";
+const FOLIAGE_LIGHT = "#2aa392";
+const STONE = "#c2b3a4";
+const STONE_DARK = "#93867a";
+
+/** Three flat light bands: shadow, mid, lit. */
+const TOON_RAMP = (() => {
+  const steps = new Uint8Array([110, 185, 250]);
+  const texture = new THREE.DataTexture(
+    steps,
+    steps.length,
+    1,
+    THREE.RedFormat,
+  );
+  texture.minFilter = THREE.NearestFilter;
+  texture.magFilter = THREE.NearestFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  return texture;
+})();
+
+/**
+ * Stroke width for every silhouette, as a fraction of half the viewport width
+ * — so a 2px stroke in CSS pixels regardless of display density or distance.
+ */
+const INK_WIDTH = 0.005;
+
+/**
+ * Inverted-hull outline.
+ *
+ * drei's <Outlines> draws nothing in this stack (drei 10.7.7 / three 0.182 /
+ * R3F 9.8): the hull is created, but no pixels reach the screen, and neither
+ * its creased-normals path nor its thickness value is the cause. Rather than
+ * keep guessing at an opaque dependency, this is the same technique written
+ * out: render the geometry again with back faces only, each vertex pushed
+ * along its normal by a constant number of screen pixels.
+ *
+ * Because the offset is applied in clip space *before* the perspective divide
+ * and multiplied by w, it cancels out to a constant on-screen width — the
+ * equivalent of the UI's 2px border, whatever the object's size or distance.
+ */
+const OUTLINE_VERTEX = /* glsl */ `
+  uniform float uWidth;
+  void main() {
+    vec4 clip = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    vec3 n = normalize(normalMatrix * normal);
+    clip.xy += n.xy * uWidth * clip.w;
+    gl_Position = clip;
+  }
+`;
+
+const OUTLINE_FRAGMENT = /* glsl */ `
+  uniform vec3 uColor;
+  void main() {
+    gl_FragColor = vec4(uColor, 1.0);
+  }
+`;
+
+/** Renders the parent mesh's geometry again as an ink silhouette. */
+function InkOutline({ width = INK_WIDTH }: { width?: number }) {
+  const ref = useRef<THREE.Mesh>(null);
+
+  const material = useMemo(
+    () =>
+      new THREE.ShaderMaterial({
+        side: THREE.BackSide,
+        uniforms: {
+          uWidth: { value: width },
+          uColor: { value: new THREE.Color(INK) },
+        },
+        vertexShader: OUTLINE_VERTEX,
+        fragmentShader: OUTLINE_FRAGMENT,
+      }),
+    [width],
+  );
+
+  // Borrow the parent mesh's geometry rather than duplicating it.
+  useLayoutEffect(() => {
+    const parent = ref.current?.parent as THREE.Mesh | undefined;
+    if (ref.current && parent?.geometry) ref.current.geometry = parent.geometry;
+  });
+
+  return <mesh ref={ref} material={material} />;
+}
 
 interface IslandWorldProps {
   users: User[];
@@ -68,11 +174,13 @@ function Ocean() {
       receiveShadow
     >
       <planeGeometry args={[120, 120, 80, 80]} />
-      <meshStandardMaterial
-        color="#3AAFA9"
+      {/* Opaque, unlike the previous 85%-transparent version: a full-screen
+          transparent surface forces depth sorting every frame, and flat water
+          is the point. The toon ramp turns the wave normals into facets. */}
+      <meshToonMaterial
+        color={WATER}
+        gradientMap={TOON_RAMP}
         flatShading
-        transparent
-        opacity={0.85}
         side={THREE.DoubleSide}
       />
     </mesh>
@@ -95,16 +203,31 @@ function LowPolyTree({
       {/* Trunk */}
       <mesh position={[0, 0.3, 0]} castShadow>
         <cylinderGeometry args={[0.08, 0.12, 0.6, 5]} />
-        <meshStandardMaterial color="#8B6F47" flatShading />
+        <meshToonMaterial
+          color={STONE_DARK}
+          gradientMap={TOON_RAMP}
+          flatShading
+        />
+        <InkOutline />
       </mesh>
       {/* Canopy – stacked low-poly cones */}
       <mesh position={[0, 0.85, 0]} castShadow>
         <coneGeometry args={[0.45, 0.7, 6]} />
-        <meshStandardMaterial color="#2D6A4F" flatShading />
+        <meshToonMaterial
+          color={FOLIAGE}
+          gradientMap={TOON_RAMP}
+          flatShading
+        />
+        <InkOutline />
       </mesh>
       <mesh position={[0, 1.2, 0]} castShadow>
         <coneGeometry args={[0.32, 0.55, 6]} />
-        <meshStandardMaterial color="#40916C" flatShading />
+        <meshToonMaterial
+          color={FOLIAGE_LIGHT}
+          gradientMap={TOON_RAMP}
+          flatShading
+        />
+        <InkOutline />
       </mesh>
     </group>
   );
@@ -117,7 +240,7 @@ function LowPolyTree({
 function LowPolyRock({
   position,
   scale = 1,
-  color = "#9CA3AF",
+  color = STONE,
 }: {
   position: [number, number, number];
   scale?: number;
@@ -126,7 +249,8 @@ function LowPolyRock({
   return (
     <mesh position={position} scale={scale} castShadow>
       <dodecahedronGeometry args={[0.25, 0]} />
-      <meshStandardMaterial color={color} flatShading />
+      <meshToonMaterial color={color} gradientMap={TOON_RAMP} flatShading />
+      <InkOutline />
     </mesh>
   );
 }
@@ -175,7 +299,8 @@ function Island({ config }: { config: IslandConfig }) {
       {/* Main island body */}
       <mesh castShadow receiveShadow>
         <cylinderGeometry args={[radiusTop, radiusBottom, height, segments]} />
-        <meshStandardMaterial color={color} flatShading />
+        <meshToonMaterial color={color} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
       </mesh>
 
       {/* Grass/top layer — slightly wider disc on top */}
@@ -183,7 +308,12 @@ function Island({ config }: { config: IslandConfig }) {
         <cylinderGeometry
           args={[radiusTop * 1.02, radiusTop, 0.08, segments]}
         />
-        <meshStandardMaterial color={color} flatShading />
+        <meshToonMaterial
+          color={SAND_LIGHT}
+          gradientMap={TOON_RAMP}
+          flatShading
+        />
+        <InkOutline />
       </mesh>
 
       {/* Bottom underside — darker layer for depth */}
@@ -191,7 +321,12 @@ function Island({ config }: { config: IslandConfig }) {
         <cylinderGeometry
           args={[radiusBottom, radiusBottom * 0.6, 0.3, segments]}
         />
-        <meshStandardMaterial color="#6B7280" flatShading />
+        <meshToonMaterial
+          color={STONE_DARK}
+          gradientMap={TOON_RAMP}
+          flatShading
+        />
+        <InkOutline />
       </mesh>
 
       {/* Decorative trees */}
@@ -217,33 +352,17 @@ function Island({ config }: { config: IslandConfig }) {
 }
 
 // ---------------------------------------------------------------------------
-// Availability ring – pulsing ring around available avatars
+// Availability ring – flat ink ring marking who can be invited
 // ---------------------------------------------------------------------------
 
 function AvailabilityRing({ available }: { available: boolean }) {
-  const ringRef = useRef<THREE.Mesh>(null);
-
-  useFrame(({ clock }) => {
-    if (!ringRef.current) return;
-    // Pulsing scale for available users
-    const pulse = available ? 1 + Math.sin(clock.elapsedTime * 3) * 0.12 : 1;
-    ringRef.current.scale.set(pulse, pulse, 1);
-    (ringRef.current.material as THREE.MeshBasicMaterial).opacity = available
-      ? 0.5 + Math.sin(clock.elapsedTime * 3) * 0.15
-      : 0.2;
-  });
-
   return (
-    <mesh
-      ref={ringRef}
-      position={[0, -0.32, 0]}
-      rotation={[-Math.PI / 2, 0, 0]}
-    >
-      <ringGeometry args={[0.4, 0.5, 24]} />
+    <mesh position={[0, -0.32, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+      <ringGeometry args={[0.42, 0.52, 28]} />
       <meshBasicMaterial
-        color={available ? "#10B981" : "#6B7280"}
+        color={available ? TEAL : STONE}
         transparent
-        opacity={0.4}
+        opacity={available ? 0.95 : 0.5}
         side={THREE.DoubleSide}
       />
     </mesh>
@@ -251,7 +370,7 @@ function AvailabilityRing({ available }: { available: boolean }) {
 }
 
 // ---------------------------------------------------------------------------
-// Avatar – user sphere with label, glow, idle bounce, and click handling
+// Avatar – user sphere with label, idle bounce, and click handling
 // ---------------------------------------------------------------------------
 
 function Avatar({
@@ -272,34 +391,22 @@ function Avatar({
   const groupRef = useRef<THREE.Group>(null);
   const [hovered, setHovered] = useState(false);
 
-  // Idle bounce animation
+  // Idle bounce, plus a lift while hovered so the click target reads as
+  // pressable without an emissive glow.
   useFrame(({ clock }) => {
     if (!groupRef.current) return;
-    groupRef.current.position.y =
-      position[1] + Math.sin(clock.elapsedTime * 2 + position[0]) * 0.1;
+    const bounce = Math.sin(clock.elapsedTime * 2 + position[0]) * 0.1;
+    groupRef.current.position.y = position[1] + bounce + (hovered ? 0.12 : 0);
   });
 
   return (
     <group ref={groupRef} position={position}>
-      {/* Availability / selection ring */}
       <AvailabilityRing available={isLocal ? true : available} />
-
-      {/* Local user glow ring on the ground */}
-      {isLocal && (
-        <mesh position={[0, -0.31, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-          <ringGeometry args={[0.55, 0.75, 24]} />
-          <meshBasicMaterial
-            color="#3B82F6"
-            transparent
-            opacity={0.25}
-            side={THREE.DoubleSide}
-          />
-        </mesh>
-      )}
 
       {/* Avatar sphere */}
       <mesh
         castShadow
+        scale={hovered ? 1.12 : 1}
         onClick={(e) => {
           e.stopPropagation();
           if (!isLocal && onClick) onClick();
@@ -316,12 +423,8 @@ function Avatar({
         }}
       >
         <sphereGeometry args={[0.35, 14, 14]} />
-        <meshStandardMaterial
-          color={color}
-          emissive={isLocal ? "#3B82F6" : hovered ? color : "#000000"}
-          emissiveIntensity={isLocal ? 0.35 : hovered ? 0.2 : 0}
-          flatShading
-        />
+        <meshToonMaterial color={color} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
       </mesh>
 
       {/* Floating name label.
@@ -345,23 +448,12 @@ function Avatar({
           {isLocal ? "You" : id.slice(0, 6)}
         </span>
       </Html>
-
-
-      {/* Availability status dot */}
-      <mesh position={[0, 0.95, 0]}>
-        <sphereGeometry args={[0.06, 8, 8]} />
-        <meshStandardMaterial
-          color={available || isLocal ? "#10B981" : "#EF4444"}
-          emissive={available || isLocal ? "#10B981" : "#EF4444"}
-          emissiveIntensity={0.4}
-        />
-      </mesh>
     </group>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Ambient floating particles (firefly-like)
+// Ambient floating particles
 // ---------------------------------------------------------------------------
 
 function Particles({ count = 60 }: { count?: number }) {
@@ -389,7 +481,7 @@ function Particles({ count = 60 }: { count?: number }) {
   return (
     <instancedMesh ref={ref} args={[undefined, undefined, count]}>
       <sphereGeometry args={[1, 6, 6]} />
-      <meshBasicMaterial color="#ffffff" transparent opacity={0.6} />
+      <meshBasicMaterial color={CREAM} transparent opacity={0.75} />
     </instancedMesh>
   );
 }
@@ -397,12 +489,16 @@ function Particles({ count = 60 }: { count?: number }) {
 // ---------------------------------------------------------------------------
 // Island presets – positions, decorations, and visual variety
 // ---------------------------------------------------------------------------
+//
+// Colours are drawn only from the UI palette (plus two warm-grey neutrals).
+// The previous six-pastel scheme shared nothing with the chrome: nothing else
+// in the product was purple, amber or sky blue.
 
 const ISLANDS: IslandConfig[] = [
   {
-    // Center island – largest, teal
+    // Center island – largest, sand
     position: [0, -1.5, 0],
-    color: "#2DD4BF",
+    color: SAND,
     radiusTop: 6.2,
     radiusBottom: 4.8,
     height: 1.6,
@@ -415,13 +511,13 @@ const ISLANDS: IslandConfig[] = [
     ],
     rocks: [
       { pos: [2, 0, -1.2], scale: 1 },
-      { pos: [-2.2, 0, 0.8], scale: 0.7, color: "#78716C" },
+      { pos: [-2.2, 0, 0.8], scale: 0.7, color: CORAL },
     ],
   },
   {
-    // Purple island – north-east
+    // Coral island – north-east
     position: [9, -1, -6],
-    color: "#A78BFA",
+    color: CORAL,
     radiusTop: 1.8,
     radiusBottom: 1.4,
     height: 0.65,
@@ -431,12 +527,12 @@ const ISLANDS: IslandConfig[] = [
       [0.6, 0.9, -0.4],
       [-0.8, 0.7, 0.5],
     ],
-    rocks: [{ pos: [1.5, 0, 0.6], scale: 0.8, color: "#7C3AED" }],
+    rocks: [{ pos: [1.5, 0, 0.6], scale: 0.8, color: STONE_DARK }],
   },
   {
-    // Amber island – south-west
+    // Mustard island – south-west
     position: [-8, -1.2, 5],
-    color: "#FBBF24",
+    color: MUSTARD,
     radiusTop: 1.9,
     radiusBottom: 1.5,
     height: 0.68,
@@ -445,25 +541,25 @@ const ISLANDS: IslandConfig[] = [
     trees: [[0, 1.1, 0]],
     rocks: [
       { pos: [-1.8, 0, -0.5], scale: 1.1 },
-      { pos: [1.3, 0, 1], scale: 0.6, color: "#D97706" },
+      { pos: [1.3, 0, 1], scale: 0.6, color: CORAL },
     ],
   },
   {
-    // Coral island – south-east
+    // Cream island – south-east
     position: [6, -0.8, 7],
-    color: "#FB7185",
+    color: CREAM,
     radiusTop: 1.6,
     radiusBottom: 1.2,
     height: 0.62,
     segments: 6,
     bobSpeed: 0.5,
     trees: [[-0.5, 0.75, 0.3]],
-    rocks: [{ pos: [1, 0, -0.4], scale: 0.7, color: "#E11D48" }],
+    rocks: [{ pos: [1, 0, -0.4], scale: 0.7, color: STONE_DARK }],
   },
   {
-    // Mint island – north-west
+    // Teal island – north-west
     position: [-7, -0.9, -7],
-    color: "#6EE7B7",
+    color: TEAL,
     radiusTop: 1.7,
     radiusBottom: 1.3,
     height: 0.62,
@@ -476,21 +572,21 @@ const ISLANDS: IslandConfig[] = [
     rocks: [],
   },
   {
-    // Small blue stepping stone
+    // Small cream stepping stone
     position: [3, -1.6, -3],
-    color: "#7DD3FC",
+    color: CREAM,
     radiusTop: 1.2,
     radiusBottom: 0.9,
     height: 0.48,
     segments: 6,
     bobSpeed: 0.6,
     trees: [],
-    rocks: [{ pos: [0.5, 0, 0.2], scale: 0.5, color: "#0EA5E9" }],
+    rocks: [{ pos: [0.5, 0, 0.2], scale: 0.5, color: STONE }],
   },
   {
     // Additional tiny islands
     position: [11, -1.2, 1],
-    color: "#2DD4BF",
+    color: SAND,
     radiusTop: 1.1,
     radiusBottom: 0.8,
     height: 0.42,
@@ -501,7 +597,7 @@ const ISLANDS: IslandConfig[] = [
   },
   {
     position: [0, -1.4, 10],
-    color: "#FBBF24",
+    color: MUSTARD,
     radiusTop: 1,
     radiusBottom: 0.75,
     height: 0.4,
@@ -512,7 +608,7 @@ const ISLANDS: IslandConfig[] = [
   },
   {
     position: [-11, -1.15, 0],
-    color: "#A78BFA",
+    color: CORAL,
     radiusTop: 1.15,
     radiusBottom: 0.82,
     height: 0.44,
@@ -523,7 +619,7 @@ const ISLANDS: IslandConfig[] = [
   },
   {
     position: [8, -1.3, 9],
-    color: "#6EE7B7",
+    color: TEAL,
     radiusTop: 0.95,
     radiusBottom: 0.7,
     height: 0.36,
@@ -534,7 +630,7 @@ const ISLANDS: IslandConfig[] = [
   },
   {
     position: [-9, -1.35, 8],
-    color: "#FB7185",
+    color: CREAM,
     radiusTop: 1,
     radiusBottom: 0.72,
     height: 0.38,
@@ -545,7 +641,7 @@ const ISLANDS: IslandConfig[] = [
   },
   {
     position: [9, -1.25, -9],
-    color: "#7DD3FC",
+    color: SAND,
     radiusTop: 0.9,
     radiusBottom: 0.65,
     height: 0.34,
@@ -556,7 +652,7 @@ const ISLANDS: IslandConfig[] = [
   },
   {
     position: [-10, -1.3, -9],
-    color: "#2DD4BF",
+    color: MUSTARD,
     radiusTop: 1.05,
     radiusBottom: 0.74,
     height: 0.4,
@@ -609,17 +705,21 @@ export function IslandWorld({
   return (
     <div className="w-full h-screen">
       <Canvas
-        shadows
+        shadows="percentage"
         camera={{ position: [12, 10, 12], fov: 55 }}
         style={{
-          background: "linear-gradient(to bottom, #7DD3FC, #E0F2FE, #ffffff)",
+          // Cream paper instead of a sky gradient: the scene sits on the same
+          // surface as the UI rather than floating in a different one.
+          background: `linear-gradient(to bottom, ${CREAM} 0%, #f6ead6 100%)`,
         }}
       >
         {/* ---- Lighting ---- */}
-        <ambientLight intensity={0.5} />
+        {/* Flatter than before on purpose: toon bands need even fill, and the
+            old 1.2-intensity key light produced soft gradients. */}
+        <ambientLight intensity={0.85} />
         <directionalLight
           position={[15, 20, 10]}
-          intensity={1.2}
+          intensity={0.75}
           castShadow
           shadow-mapSize-width={2048}
           shadow-mapSize-height={2048}
@@ -630,11 +730,9 @@ export function IslandWorld({
           shadow-camera-near={0.5}
           shadow-camera-far={60}
         />
-        {/* Soft fill light from below to lighten shadows */}
-        <hemisphereLight args={["#BAE6FD", "#D1FAE5", 0.35]} />
 
         {/* ---- Fog for depth / horizon blend ---- */}
-        <fog attach="fog" args={["#BAE6FD", 20, 65]} />
+        <fog attach="fog" args={[CREAM, 26, 70]} />
 
         {/* ---- Camera controls ---- */}
         <OrbitControls
