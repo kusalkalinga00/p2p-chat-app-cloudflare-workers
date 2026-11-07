@@ -101,6 +101,12 @@ const HTTP = ORIGIN.replace(/^ws/, "http");
 
 /** ICE configuration endpoint: what the browser uses to build its connection. */
 async function checkIceEndpoint() {
+  // No Origin header at all (a bare curl) must be refused: minting credentials
+  // for anonymous callers spends the relay quota on anyone's behalf.
+  const noOrigin = await fetch(`${HTTP}/ice`);
+  assert.equal(noOrigin.status, 403);
+  ok("/ice refuses a request with no Origin header");
+
   const response = await fetch(`${HTTP}/ice`, {
     headers: { Origin: "http://localhost:5180" },
   });
@@ -115,15 +121,16 @@ async function checkIceEndpoint() {
   assert.match(response.headers.get("vary") ?? "", /Origin/i);
   ok("/ice returns an ICE config with CORS for an allowed origin");
 
-  // An unknown origin must not be echoed back.
+  // An unknown origin is refused outright, not merely left un-echoed.
   const foreign = await fetch(`${HTTP}/ice`, {
     headers: { Origin: "https://evil.example" },
   });
+  assert.equal(foreign.status, 403);
   assert.notEqual(
     foreign.headers.get("access-control-allow-origin"),
     "https://evil.example",
   );
-  ok("/ice does not reflect an unknown origin");
+  ok("/ice refuses an unknown origin");
 
   const health = await fetch(`${HTTP}/health`);
   assert.equal(health.status, 200);

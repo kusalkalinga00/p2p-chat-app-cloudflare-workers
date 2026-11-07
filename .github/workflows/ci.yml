@@ -5,6 +5,10 @@ on:
   push:
     branches: [main]
 
+# Least privilege: the default workflow token has historically been read-write.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -15,10 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      # Actions are pinned to commit SHAs: a mutable tag can be retargeted at
+      # any time, and a third-party action runs with this job's token.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: pnpm
@@ -43,10 +48,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: pnpm
@@ -59,7 +63,7 @@ jobs:
           pnpm --filter server dev > /tmp/wrangler.log 2>&1 &
           echo $! > /tmp/wrangler.pid
           for i in $(seq 1 60); do
-            if curl -s -o /dev/null http://127.0.0.1:8787/world/ci; then
+            if curl -s -o /dev/null http://127.0.0.1:8787/health; then
               echo "worker is up"
               exit 0
             fi

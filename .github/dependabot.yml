@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # pnpm workspaces are covered by the npm ecosystem.
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for the toolchain, so a security bump is not drowned out by noise.
+      build-tooling:
+        dependency-type: development
+      runtime:
+        dependency-type: production
+
+  # Keeps CI actions pinned to fresh commit SHAs.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly

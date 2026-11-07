@@ -1,7 +1,8 @@
 # Local TURN relay for verifying that peers connect when a direct path
 # is unavailable.
 #
-#   docker compose -f infra/turn/docker-compose.yml up -d
+#   TURN_USER=island TURN_PASS=<local-only-password> \
+#     docker compose -f infra/turn/docker-compose.yml up -d
 #   docker compose -f infra/turn/docker-compose.yml logs -f
 #
 # Then point the Worker at it (see apps/server/wrangler.toml):
@@ -25,4 +26,7 @@ services:
       - "-c"
       - "/etc/coturn/turnserver.conf"
       - "--external-ip=${TURN_EXTERNAL_IP:-192.168.20.87}"
+      # Credentials come from the environment, with no committed default:
+      #   TURN_USER=island TURN_PASS=some-local-password docker compose up
+      - "--user=${TURN_USER:?set TURN_USER}:${TURN_PASS:?set TURN_PASS}"
     restart: unless-stopped
