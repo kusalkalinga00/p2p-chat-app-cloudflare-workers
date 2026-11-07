@@ -176,23 +176,40 @@ ICE configuration with `GET /ice`; the Worker mints short-lived TURN credentials
 and returns them. A TURN key can mint unlimited credentials, so it is kept as a
 Worker secret and never reaches the client.
 
-### Production (Cloudflare TURN)
+### Provider A — Metered Open Relay (free, no card)
 
-Create a TURN key at [dash.cloudflare.com → Realtime](https://dash.cloudflare.com/?to=/:account/calls),
-then store it as secrets:
+20 GB/month free, runs on ports 80/443, and needs no payment method:
+
+1. Create a free account at [metered.ca](https://www.metered.ca/) and copy the API key.
+2. Store the key and your app subdomain as secrets:
 
 ```bash
 cd apps/server
-pnpm wrangler secret put TURN_KEY_ID
-pnpm wrangler secret put TURN_KEY_API_TOKEN
+pnpm exec wrangler secret put METERED_API_KEY
+pnpm exec wrangler secret put METERED_APP      # the <app> in <app>.metered.live
 ```
 
-Optional: `TURN_TTL_SECONDS` (default `86400`). Credentials are cached per
-isolate until a minute before they expire, so the mint endpoint is not called per
-visitor.
+Their REST API returns credentials for the caller's nearest region; the Worker
+caches them for at most an hour.
 
-Cloudflare TURN costs **$0.05/GB outbound** unless it is used together with the
-Realtime SFU, so it is worth watching usage on a busy island.
+### Provider B — Cloudflare TURN (billed per GB)
+
+Requires billing enabled on the account. Create a key at
+[dash.cloudflare.com → Realtime](https://dash.cloudflare.com/?to=/:account/calls),
+then:
+
+```bash
+cd apps/server
+pnpm exec wrangler secret put TURN_KEY_ID
+pnpm exec wrangler secret put TURN_KEY_API_TOKEN
+```
+
+Optional: `TURN_TTL_SECONDS` (default `86400`). Costs **$0.05/GB outbound**
+unless used with the Realtime SFU.
+
+Providers are tried in order (Cloudflare → Metered → static → STUN), and a
+failed mint falls through to the next one, so a revoked or rate-limited key
+degrades connectivity instead of breaking it.
 
 ### Local (coturn in Docker)
 
