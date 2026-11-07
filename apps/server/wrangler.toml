@@ -6,9 +6,18 @@ compatibility_date = "2024-01-01"
 name = "WORLD"
 class_name = "World"
 
+# One instance per client IP, used to rate limit GET /ice.
+[[durable_objects.bindings]]
+name = "RATE_LIMITER"
+class_name = "IceRateLimiter"
+
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["World"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["IceRateLimiter"]
 
 [observability]
 [observability.logs]
@@ -54,5 +63,11 @@ invocation_logs = true
 # TURN_PASSWORD = "islanddev"
 #
 # Allowed browser origins for CORS (comma separated). Defaults to localhost
-# and the production Pages domain when unset.
+# and the production Pages domain when unset. Also the allowlist that /ice
+# checks before minting credentials.
 # ALLOWED_ORIGINS = "http://localhost:5180,https://example.pages.dev"
+#
+# /ice rate limiting, per client IP. Defaults: 30 requests per 3600 seconds.
+# Only applies when a TURN provider is configured.
+# ICE_RATE_LIMIT = "30"
+# ICE_RATE_WINDOW_SECONDS = "3600"

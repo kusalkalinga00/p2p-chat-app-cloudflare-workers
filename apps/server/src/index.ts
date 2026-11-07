@@ -2,6 +2,7 @@ import type { IceConfigResponse, IceServer } from "@p2p-chat/types";
 import { World } from "./world";
 
 export { World };
+export { IceRateLimiter } from "./rate-limiter";
 
 /**
  * TURN configuration, all optional. Providers are tried in this order:
@@ -20,7 +21,12 @@ export { World };
  */
 export interface Env {
   WORLD: DurableObjectNamespace<World>;
+  RATE_LIMITER: DurableObjectNamespace;
   ALLOWED_ORIGINS?: string;
+  /** Max /ice requests per client IP per window. Default 30. */
+  ICE_RATE_LIMIT?: string;
+  /** Rate-limit window in seconds. Default 3600. */
+  ICE_RATE_WINDOW_SECONDS?: string;
   TURN_KEY_ID?: string;
   TURN_KEY_API_TOKEN?: string;
   TURN_TTL_SECONDS?: string;
@@ -221,6 +227,59 @@ function staticCredentials(env: Env): IceConfigResponse | null {
   };
 }
 
+/** True when /ice will call a provider (and therefore cost something). */
+function hasTurnProvider(env: Env): boolean {
+  return Boolean(
+    (env.TURN_KEY_ID && env.TURN_KEY_API_TOKEN) ||
+      (env.METERED_SECRET_KEY && env.METERED_APP) ||
+      (env.TURN_URLS && env.TURN_USERNAME && env.TURN_PASSWORD),
+  );
+}
+
+/**
+ * Only callers we recognise get credentials. Browsers always send `Origin` on a
+ * cross-origin fetch; a bare `curl` does not. This is friction for casual abuse
+ * rather than authentication — the header is spoofable by anyone determined —
+ * which is why the IP rate limit sits behind it.
+ */
+function isTrustedOrigin(request: Request, env: Env): boolean {
+  const origin = request.headers.get("Origin");
+  if (!origin) return false;
+  return allowedOrigins(env).includes(origin);
+}
+
+/**
+ * Ask the per-IP limiter whether this request may mint credentials.
+ * Returns null when allowed, or a 429 response when not.
+ */
+async function checkIceRateLimit(
+  request: Request,
+  env: Env,
+): Promise<Response | null> {
+  const limit = Number(env.ICE_RATE_LIMIT) || 30;
+  const windowSeconds = Number(env.ICE_RATE_WINDOW_SECONDS) || 3600;
+
+  // Cloudflare sets this at the edge; it cannot be spoofed by the client.
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const id = env.RATE_LIMITER.idFromName(`ice:${ip}`);
+  const limiter = env.RATE_LIMITER.get(id);
+
+  const result = await limiter.fetch(
+    `https://limiter/?limit=${limit}&window=${windowSeconds}`,
+  );
+
+  if (result.status !== 429) return null;
+
+  const retryAfter = result.headers.get("Retry-After") ?? "60";
+  return Response.json(
+    { error: "Rate limit exceeded", retryAfter: Number(retryAfter) },
+    {
+      status: 429,
+      headers: { "Retry-After": retryAfter, "Access-Control-Allow-Origin": "*" },
+    },
+  );
+}
+
 async function buildIceResponse(env: Env): Promise<IceConfigResponse> {
   if (env.TURN_KEY_ID && env.TURN_KEY_API_TOKEN) {
     const minted = await mintCloudflareCredentials(env);
@@ -251,6 +310,20 @@ export default {
     // ICE server configuration for the browser. Credentials are minted here so
     // the TURN key never ships in the client bundle.
     if (url.pathname === "/ice") {
+      if (!isTrustedOrigin(request, env)) {
+        return Response.json(
+          { error: "Origin not allowed" },
+          { status: 403, headers: { Vary: "Origin" } },
+        );
+      }
+
+      // Only spend the DO request when a provider is configured: with no TURN
+      // the response is static STUN and there is nothing to protect.
+      if (hasTurnProvider(env)) {
+        const limited = await checkIceRateLimit(request, env);
+        if (limited) return limited;
+      }
+
       const body = await buildIceResponse(env);
 
       return Response.json(body, {

@@ -13,6 +13,9 @@ worker-configuration.d.ts
 .env
 .env.local
 .env.*.local
+# Wrangler reads local secrets from .dev.vars — never commit it
+.dev.vars
+.dev.vars.*
 
 # Logs
 logs

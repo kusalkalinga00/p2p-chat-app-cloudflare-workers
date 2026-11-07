@@ -229,19 +229,46 @@ degrades connectivity instead of breaking it.
 ```bash
 # TURN_EXTERNAL_IP must be an address peers can reach — your LAN IP, not
 # 127.0.0.1, because the relay socket lives inside the container network.
+# Credentials come from the environment; none are committed.
 TURN_EXTERNAL_IP=$(ipconfig getifaddr en0) \
+TURN_USER=island TURN_PASS=localdev \
   docker compose -f infra/turn/docker-compose.yml up -d
 
 # Point the Worker at it (no secrets needed locally)
 cd apps/server
-pnpm wrangler dev \
+pnpm exec wrangler dev \
   --var TURN_URLS:"turn:$TURN_EXTERNAL_IP:3478?transport=udp" \
-  --var TURN_USERNAME:island --var TURN_PASSWORD:islanddev
+  --var TURN_USERNAME:island --var TURN_PASSWORD:localdev
 ```
 
 Without any TURN configuration `/ice` still answers, with public STUN only, and
 the client falls back to STUN if the endpoint is unreachable — a broken Worker
 degrades connectivity rather than breaking it.
+
+### Protecting `/ice`
+
+`/ice` spends real quota (relay bandwidth, or a metered free tier), so it is not
+open to the world:
+
+- **Origin allowlist.** A request with no `Origin` header, or one that is not in
+  `ALLOWED_ORIGINS`, gets `403`. This blocks casual scraping and bare `curl`. It
+  is *not* authentication — the header can be forged — which is why the next
+  layer exists.
+- **Per-IP rate limit.** A Durable Object (`IceRateLimiter`) counts requests per
+  client IP in a sliding window and answers `429` with `Retry-After` when the
+  budget is spent. Defaults: 30 requests per hour (`ICE_RATE_LIMIT`,
+  `ICE_RATE_WINDOW_SECONDS`). Only active when a TURN provider is configured,
+  since STUN-only responses cost nothing.
+- Credentials are cached per isolate until a minute before expiry, so normal
+  traffic mints rarely.
+
+`curl https://…/ice` now returns `403` by design. To check it manually, send the
+header:
+
+```bash
+curl -H "Origin: https://p2p-chat-app-cloudflare-workers.pages.dev" \
+  https://p2p-chat-server.kusalkalingainfo.workers.dev/ice
+```
 
 ## Known limitations
 
