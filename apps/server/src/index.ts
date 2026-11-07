@@ -8,7 +8,7 @@ export { World };
  *
  * 1. Cloudflare TURN — `TURN_KEY_ID` + `TURN_KEY_API_TOKEN` secrets. Mints
  *    short-lived credentials. Billed per GB, needs billing enabled.
- * 2. Metered Open Relay — `METERED_API_KEY` + `METERED_APP` secrets. 20 GB/month
+ * 2. Metered Open Relay — `METERED_SECRET_KEY` + `METERED_APP` secrets. Free
  *    free, no card. Credentials come from their REST API per request.
  * 3. Static — `TURN_URLS`, `TURN_USERNAME`, `TURN_PASSWORD` vars, e.g. a local
  *    coturn instance.
@@ -24,7 +24,7 @@ export interface Env {
   TURN_KEY_ID?: string;
   TURN_KEY_API_TOKEN?: string;
   TURN_TTL_SECONDS?: string;
-  METERED_API_KEY?: string;
+  METERED_SECRET_KEY?: string;
   METERED_APP?: string;
   TURN_URLS?: string;
   TURN_USERNAME?: string;
@@ -137,47 +137,73 @@ async function mintMeteredCredentials(
   if (cached && cached.expiresAt > Date.now()) return cached.body;
 
   const app = env.METERED_APP;
-  const apiKey = env.METERED_API_KEY;
-  if (!app || !apiKey) return null;
+  const secretKey = env.METERED_SECRET_KEY;
+  if (!app || !secretKey) return null;
 
   // Accept either "island-chat" or the full "island-chat.metered.live".
   const host = app.replace(/\.metered\.live$/, "");
-
-  let response: Response;
-  try {
-    response = await fetch(
-      `https://${host}.metered.live/api/v1/turn/credentials?apiKey=${apiKey}`,
-    );
-  } catch (err) {
-    console.error("[turn] metered credential request failed:", err);
-    return null;
-  }
-
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    console.error(
-      `[turn] metered credential fetch failed: ${response.status} ${detail.slice(0, 200)}`,
-    );
-    return null;
-  }
-
-  const payload = (await response.json()) as IceServer[] | IceConfigResponse;
-  // Their docs return the array directly; tolerate a wrapped body too.
-  const iceServers = Array.isArray(payload) ? payload : payload.iceServers;
-
-  if (!Array.isArray(iceServers) || iceServers.length === 0) return null;
 
   const ttl = Math.min(
     Number(env.TURN_TTL_SECONDS) || METERED_MAX_CACHE_SECONDS,
     METERED_MAX_CACHE_SECONDS,
   );
 
-  credentialCache = {
-    expiresAt: Date.now() + Math.max(ttl - 60, 30) * 1000,
-    body: { iceServers, ttl },
-  };
+  try {
+    // Step 1: create a credential. This returns a per-credential `apiKey`,
+    // which is what the ICE server lookup takes — the secret key is not it.
+    const create = await fetch(
+      `https://${host}.metered.live/api/v1/turn/credential?secretKey=${secretKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expiryInSeconds: ttl, label: "island-chat" }),
+      },
+    );
 
-  return credentialCache.body;
+    if (!create.ok) {
+      const detail = await create.text().catch(() => "");
+      console.error(
+        `[turn] metered credential create failed: ${create.status} ${detail.slice(0, 200)}`,
+      );
+      return null;
+    }
+
+    const created = (await create.json()) as { apiKey?: string };
+    if (!created.apiKey) {
+      console.error("[turn] metered credential create returned no apiKey");
+      return null;
+    }
+
+    // Step 2: resolve the ICE servers for that credential.
+    const lookup = await fetch(
+      `https://${host}.metered.live/api/v1/turn/credentials?apiKey=${created.apiKey}`,
+    );
+
+    if (!lookup.ok) {
+      const detail = await lookup.text().catch(() => "");
+      console.error(
+        `[turn] metered ice lookup failed: ${lookup.status} ${detail.slice(0, 200)}`,
+      );
+      return null;
+    }
+
+    const payload = (await lookup.json()) as IceServer[] | IceConfigResponse;
+    // Their docs return the array directly; tolerate a wrapped body too.
+    const iceServers = Array.isArray(payload) ? payload : payload.iceServers;
+
+    if (!Array.isArray(iceServers) || iceServers.length === 0) return null;
+
+    credentialCache = {
+      expiresAt: Date.now() + Math.max(ttl - 60, 30) * 1000,
+      body: { iceServers, ttl },
+    };
+
+    return credentialCache.body;
+  } catch (err) {
+    // A network failure must degrade to STUN, not fail the whole request.
+    console.error("[turn] metered credential request failed:", err);
+    return null;
+  }
 }
 
 /** Static credentials, e.g. a local coturn using long-term auth. */
@@ -202,7 +228,7 @@ async function buildIceResponse(env: Env): Promise<IceConfigResponse> {
     if (minted) return minted;
   }
 
-  if (env.METERED_API_KEY && env.METERED_APP) {
+  if (env.METERED_SECRET_KEY && env.METERED_APP) {
     const metered = await mintMeteredCredentials(env);
     if (metered) return metered;
   }
@@ -230,7 +256,7 @@ export default {
       return Response.json(body, {
         headers: {
           ...cors,
-          "Cache-Control": env.TURN_KEY_ID || env.METERED_API_KEY
+          "Cache-Control": env.TURN_KEY_ID || env.METERED_SECRET_KEY
             ? "private, max-age=60"
             : "public, max-age=300",
         },

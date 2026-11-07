@@ -22,12 +22,16 @@ invocation_logs = true
 # RTCPeerConnection. Credentials are resolved server-side so nothing secret
 # ships in the client bundle.
 #
-# Option A — Metered Open Relay: 20 GB/month free, no payment method needed.
+# Option A — Metered Open Relay: free, no payment method needed.
 #   (1) sign up at https://www.metered.ca/ (free account, email only)
-#   (2) wrangler secret put METERED_API_KEY    # from their dashboard
-#   (3) wrangler secret put METERED_APP        # the subdomain: <app>.metered.live
-# Their endpoint returns region-appropriate credentials, which the Worker
-# caches for an hour.
+#   (2) left nav -> Developers -> copy the Secret key
+#   (3) wrangler secret put METERED_SECRET_KEY
+#       wrangler secret put METERED_APP         # island-chat, or the full
+#                                               # island-chat.metered.live
+# The Worker creates a short-lived credential, resolves its ICE servers, and
+# caches them. Note: new credentials can take up to 2 minutes to propagate
+# across Metered's network, which is why the client prefetches on connect
+# rather than at call setup.
 #
 # Option B — Cloudflare TURN (requires billing enabled on the account):
 #

@@ -178,19 +178,30 @@ Worker secret and never reaches the client.
 
 ### Provider A — Metered Open Relay (free, no card)
 
-20 GB/month free, runs on ports 80/443, and needs no payment method:
+Runs on ports 80/443 (good for corporate firewalls) and needs no payment method.
+Free accounts start on a trial quota — check the dashboard's "Quota remaining",
+since it is not the same as the headline marketing figure.
 
-1. Create a free account at [metered.ca](https://www.metered.ca/) and copy the API key.
-2. Store the key and your app subdomain as secrets:
+1. Create a free account at [metered.ca](https://www.metered.ca/).
+2. Left navigation → **Developers** → copy the **Secret key** and note your
+   **Metered domain**.
+3. Store both as secrets:
 
 ```bash
 cd apps/server
-pnpm exec wrangler secret put METERED_API_KEY
-pnpm exec wrangler secret put METERED_APP      # the <app> in <app>.metered.live
+pnpm exec wrangler secret put METERED_SECRET_KEY
+pnpm exec wrangler secret put METERED_APP      # island-chat
 ```
 
-Their REST API returns credentials for the caller's nearest region; the Worker
-caches them for at most an hour.
+The flow is two calls, both made Worker-side: create a credential
+(`POST /api/v1/turn/credential?secretKey=…`) to get a per-credential `apiKey`,
+then resolve its ICE servers (`GET /api/v1/turn/credentials?apiKey=…`). The
+result is cached for at most an hour.
+
+**Propagation matters:** a freshly created credential can take up to two minutes
+to become usable across Metered's network. The client prefetches ICE config when
+it connects, so it is usually warm before anyone opens a chat — but a chat
+started seconds after a cold restart may fall back to STUN.
 
 ### Provider B — Cloudflare TURN (billed per GB)
 
