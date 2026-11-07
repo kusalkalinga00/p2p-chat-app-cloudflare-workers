@@ -4,16 +4,19 @@ import { World } from "./world";
 export { World };
 
 /**
- * TURN configuration, all optional.
+ * TURN configuration, all optional. Providers are tried in this order:
  *
- * - Production: set `TURN_KEY_ID` + `TURN_KEY_API_TOKEN` as Worker secrets and
- *   the Worker mints short-lived credentials server-side. The TURN key is a
- *   long-term secret that can mint unlimited credentials, so it must never
- *   reach the browser.
- * - Local development: set `TURN_URLS`, `TURN_USERNAME`, `TURN_PASSWORD` as
- *   vars to point at a local coturn instance.
- * - Neither: clients fall back to public STUN, which works on the same network
- *   but not through symmetric NAT.
+ * 1. Cloudflare TURN — `TURN_KEY_ID` + `TURN_KEY_API_TOKEN` secrets. Mints
+ *    short-lived credentials. Billed per GB, needs billing enabled.
+ * 2. Metered Open Relay — `METERED_API_KEY` + `METERED_APP` secrets. 20 GB/month
+ *    free, no card. Credentials come from their REST API per request.
+ * 3. Static — `TURN_URLS`, `TURN_USERNAME`, `TURN_PASSWORD` vars, e.g. a local
+ *    coturn instance.
+ * 4. None — clients fall back to public STUN, which works on permissive
+ *    networks but not through symmetric NAT.
+ *
+ * Every provider key is a long-term secret that can mint unlimited credentials,
+ * so keys stay server-side and never reach the browser.
  */
 export interface Env {
   WORLD: DurableObjectNamespace<World>;
@@ -21,6 +24,8 @@ export interface Env {
   TURN_KEY_ID?: string;
   TURN_KEY_API_TOKEN?: string;
   TURN_TTL_SECONDS?: string;
+  METERED_API_KEY?: string;
+  METERED_APP?: string;
   TURN_URLS?: string;
   TURN_USERNAME?: string;
   TURN_PASSWORD?: string;
@@ -38,6 +43,9 @@ const FALLBACK_ICE_SERVERS: IceServer[] = [
 ];
 
 const CLOUDFLARE_TURN_ENDPOINT = "https://rtc.live.cloudflare.com/v1/turn/keys";
+
+/** Free tier; credentials are short-lived, so cache them for an hour at most. */
+const METERED_MAX_CACHE_SECONDS = 3_600;
 
 const DEFAULT_TURN_TTL_SECONDS = 86_400;
 
@@ -79,17 +87,24 @@ async function mintCloudflareCredentials(
 
   const ttl = Number(env.TURN_TTL_SECONDS) || DEFAULT_TURN_TTL_SECONDS;
 
-  const response = await fetch(
-    `${CLOUDFLARE_TURN_ENDPOINT}/${env.TURN_KEY_ID}/credentials/generate-ice-servers`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.TURN_KEY_API_TOKEN}`,
-        "Content-Type": "application/json",
+  let response: Response;
+  try {
+    response = await fetch(
+      `${CLOUDFLARE_TURN_ENDPOINT}/${env.TURN_KEY_ID}/credentials/generate-ice-servers`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.TURN_KEY_API_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ ttl }),
       },
-      body: JSON.stringify({ ttl }),
-    },
-  );
+    );
+  } catch (err) {
+    // A network failure must degrade to STUN, not fail the whole request.
+    console.error("[turn] credential mint request failed:", err);
+    return null;
+  }
 
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
@@ -106,6 +121,53 @@ async function mintCloudflareCredentials(
     // Renew a minute early so a client never receives a dead credential.
     expiresAt: Date.now() + Math.max(ttl - 60, 30) * 1000,
     body: { ...body, ttl },
+  };
+
+  return credentialCache.body;
+}
+
+/**
+ * Metered Open Relay: 20 GB/month free, no payment method. Their endpoint
+ * returns the `iceServers` array for the caller's nearest region.
+ */
+async function mintMeteredCredentials(
+  env: Env,
+): Promise<IceConfigResponse | null> {
+  const cached = credentialCache;
+  if (cached && cached.expiresAt > Date.now()) return cached.body;
+
+  let response: Response;
+  try {
+    response = await fetch(
+      `https://${env.METERED_APP}.metered.live/api/v1/turn/credentials?apiKey=${env.METERED_API_KEY}`,
+    );
+  } catch (err) {
+    console.error("[turn] metered credential request failed:", err);
+    return null;
+  }
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    console.error(
+      `[turn] metered credential fetch failed: ${response.status} ${detail.slice(0, 200)}`,
+    );
+    return null;
+  }
+
+  const payload = (await response.json()) as IceServer[] | IceConfigResponse;
+  // Their docs return the array directly; tolerate a wrapped body too.
+  const iceServers = Array.isArray(payload) ? payload : payload.iceServers;
+
+  if (!Array.isArray(iceServers) || iceServers.length === 0) return null;
+
+  const ttl = Math.min(
+    Number(env.TURN_TTL_SECONDS) || METERED_MAX_CACHE_SECONDS,
+    METERED_MAX_CACHE_SECONDS,
+  );
+
+  credentialCache = {
+    expiresAt: Date.now() + Math.max(ttl - 60, 30) * 1000,
+    body: { iceServers, ttl },
   };
 
   return credentialCache.body;
@@ -133,6 +195,11 @@ async function buildIceResponse(env: Env): Promise<IceConfigResponse> {
     if (minted) return minted;
   }
 
+  if (env.METERED_API_KEY && env.METERED_APP) {
+    const metered = await mintMeteredCredentials(env);
+    if (metered) return metered;
+  }
+
   const staticConfig = staticCredentials(env);
   if (staticConfig) return staticConfig;
 
@@ -156,7 +223,7 @@ export default {
       return Response.json(body, {
         headers: {
           ...cors,
-          "Cache-Control": env.TURN_KEY_ID
+          "Cache-Control": env.TURN_KEY_ID || env.METERED_API_KEY
             ? "private, max-age=60"
             : "public, max-age=300",
         },

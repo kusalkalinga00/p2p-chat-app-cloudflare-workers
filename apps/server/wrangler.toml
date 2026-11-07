@@ -22,7 +22,14 @@ invocation_logs = true
 # RTCPeerConnection. Credentials are resolved server-side so nothing secret
 # ships in the client bundle.
 #
-# Production — Cloudflare TURN. Set these as secrets, never as vars:
+# Option A — Metered Open Relay: 20 GB/month free, no payment method needed.
+#   (1) sign up at https://www.metered.ca/ (free account, email only)
+#   (2) wrangler secret put METERED_API_KEY    # from their dashboard
+#   (3) wrangler secret put METERED_APP        # the subdomain: <app>.metered.live
+# Their endpoint returns region-appropriate credentials, which the Worker
+# caches for an hour.
+#
+# Option B — Cloudflare TURN (requires billing enabled on the account):
 #
 #   wrangler secret put TURN_KEY_ID
 #   wrangler secret put TURN_KEY_API_TOKEN
