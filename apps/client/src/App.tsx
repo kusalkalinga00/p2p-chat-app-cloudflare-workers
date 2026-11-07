@@ -6,7 +6,7 @@ import {
   IncomingInvitationModal,
 } from "./components/InvitationModal";
 import { WorldBot } from "./components/WorldBot";
-import { Wifi, WifiOff, Loader2, Users } from "lucide-react";
+import { Wifi, WifiOff, Loader2 } from "lucide-react";
 import type {
   ChatMessage,
   ClientMessage,
@@ -695,30 +695,31 @@ function App() {
 
   if (!connected && view === "world") {
     return (
-      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6">
-        <div className="bg-white rounded-2xl shadow-lg border border-slate-200 p-8 w-full max-w-md text-center">
-          <h1 className="text-2xl font-bold text-slate-800 mb-6">
-            Island Chat
-          </h1>
+      <div className="min-h-dvh bg-cream flex flex-col items-center justify-center p-6">
+        <div className="buoy-card w-full max-w-md p-8 text-center">
+          <h1 className="text-3xl font-black tracking-tight">Island Chat</h1>
+          <p className="mt-1.5 text-sm font-medium text-ink/70">
+            A small floating island. Spot someone, say hello.
+          </p>
 
-          <div className="flex items-center justify-center gap-3 mb-6 py-4 bg-slate-50 rounded-xl">
+          <div className="mt-6 flex justify-center">
             {isConnecting ? (
-              <>
-                <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />
-                <span className="font-medium text-blue-700">Connecting…</span>
-              </>
+              <span className="sticker bg-mustard px-4 py-1.5 text-sm font-extrabold">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Connecting…
+              </span>
             ) : (
-              <>
-                <WifiOff className="w-5 h-5 text-slate-400" />
-                <span className="font-medium text-slate-500">Disconnected</span>
-              </>
+              <span className="sticker px-4 py-1.5 text-sm font-extrabold text-ink/70">
+                <WifiOff className="w-4 h-4" />
+                Not connected
+              </span>
             )}
           </div>
 
           <button
             onClick={connect}
             disabled={isConnecting}
-            className="w-full flex items-center justify-center gap-2 px-6 py-3.5 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white rounded-xl font-semibold transition-all"
+            className="sticker-btn mt-5 w-full bg-coral px-6 py-3.5 text-base text-ink"
           >
             {isConnecting ? (
               <Loader2 className="w-5 h-5 animate-spin" />
@@ -728,6 +729,10 @@ function App() {
             {isConnecting ? "Connecting…" : "Enter World"}
           </button>
         </div>
+
+        <p className="mt-6 font-mono text-[10px] tracking-[0.18em] uppercase text-ink/60">
+          peer to peer · nothing stored
+        </p>
       </div>
     );
   }
@@ -736,24 +741,18 @@ function App() {
   // Render: Private Chat view
   // ────────────────────────────────────────────────────────────────
 
-  if (view === "chat" && chatTarget) {
-    return (
-      <PrivateChat
-        peerId={chatTarget}
-        messages={messages}
-        rtcStatus={rtcStatus}
-        onSend={sendChatMessage}
-        onLeave={leaveChat}
-      />
-    );
-  }
+  // ────────────────────────────────────────────────────────────────
+  // Render: the world, with the chat docked over it
+  //
+  // The chat is an overlay rather than a separate view: keeping the canvas
+  // mounted means you can still watch the island while talking, and leaving
+  // the chat returns to exactly the camera you left rather than rebuilding it.
+  // ────────────────────────────────────────────────────────────────
 
-  // ────────────────────────────────────────────────────────────────
-  // Render: 3D World view
-  // ────────────────────────────────────────────────────────────────
+  const isChatting = view === "chat" && chatTarget !== null;
 
   return (
-    <div className="relative w-full h-screen">
+    <div className="relative h-dvh w-full overflow-hidden bg-cream">
       {/* 3D World */}
       <IslandWorld
         users={users}
@@ -763,54 +762,63 @@ function App() {
         onAvatarClick={handleAvatarClick}
       />
 
-      {/* ── HUD Overlay ── */}
-      <div className="absolute top-4 left-4 bg-white/90 backdrop-blur rounded-xl p-4 shadow-lg border border-slate-200 max-w-xs">
-        <div className="flex items-center gap-2 mb-2">
-          <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-          <span className="font-semibold text-slate-800">Connected</span>
-        </div>
-        <p className="text-xs text-slate-500 font-mono mb-3">
-          ID: {identity.id.slice(0, 8)}
-        </p>
-      </div>
+      {!isChatting && (
+        <>
+          {/* ── HUD ── */}
+          <div className="absolute top-4 left-4 z-10 flex flex-col items-start gap-2">
+            <span className="sticker px-3.5 py-1.5 text-xs font-extrabold">
+              <span className="h-2.5 w-2.5 rounded-full border-2 border-ink bg-teal" />
+              {users.length + 1} on the island
+            </span>
+            <span className="sticker px-3 py-1 text-[11px] font-bold text-ink/70">
+              you · {identity.id.slice(0, 8)}
+            </span>
+          </div>
 
-      {/* User count */}
-      <div className="absolute top-4 right-4 bg-white/90 backdrop-blur rounded-xl px-4 py-2 shadow-lg border border-slate-200">
-        <div className="flex items-center gap-2">
-          <Users className="w-4 h-4 text-slate-700" />
-          <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-          <span className="text-sm font-semibold text-slate-700">
-            {users.length + 1}
-          </span>
-        </div>
-      </div>
+          <div className="absolute top-4 right-4 z-10">
+            <span className="sticker bg-teal px-3.5 py-1.5 text-xs font-extrabold text-ink">
+              online
+            </span>
+          </div>
 
-      {showWorldBot && (
-        <WorldBot
-          message={worldBotMessage}
-          onClose={() => {
-            setIsBotClosed(true);
-            setNotice(null);
-          }}
-        />
+          {showWorldBot && (
+            <WorldBot
+              message={worldBotMessage}
+              onClose={() => {
+                setIsBotClosed(true);
+                setNotice(null);
+              }}
+            />
+          )}
+
+          {/* ── Outgoing invitation modal ── */}
+          {outgoingTarget && (
+            <OutgoingInvitationModal
+              targetId={outgoingTarget}
+              status={outgoingStatus}
+              onSend={sendInvitation}
+              onCancel={cancelOutgoing}
+            />
+          )}
+
+          {/* ── Incoming invitation modal ── */}
+          {incomingRequest && !outgoingTarget && (
+            <IncomingInvitationModal
+              fromId={incomingRequest}
+              onAccept={acceptIncoming}
+              onDecline={declineIncoming}
+            />
+          )}
+        </>
       )}
 
-      {/* ── Outgoing invitation modal ── */}
-      {outgoingTarget && (
-        <OutgoingInvitationModal
-          targetId={outgoingTarget}
-          status={outgoingStatus}
-          onSend={sendInvitation}
-          onCancel={cancelOutgoing}
-        />
-      )}
-
-      {/* ── Incoming invitation modal ── */}
-      {incomingRequest && !outgoingTarget && (
-        <IncomingInvitationModal
-          fromId={incomingRequest}
-          onAccept={acceptIncoming}
-          onDecline={declineIncoming}
+      {isChatting && (
+        <PrivateChat
+          peerId={chatTarget}
+          messages={messages}
+          rtcStatus={rtcStatus}
+          onSend={sendChatMessage}
+          onLeave={leaveChat}
         />
       )}
     </div>
