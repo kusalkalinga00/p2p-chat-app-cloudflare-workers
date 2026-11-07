@@ -311,9 +311,11 @@ export default {
     // the TURN key never ships in the client bundle.
     if (url.pathname === "/ice") {
       if (!isTrustedOrigin(request, env)) {
+        // Without CORS headers the browser reports this as an opaque
+        // "Failed to fetch" and the actual 403 is invisible to the client.
         return Response.json(
           { error: "Origin not allowed" },
-          { status: 403, headers: { Vary: "Origin" } },
+          { status: 403, headers: { ...cors, Vary: "Origin" } },
         );
       }
 
