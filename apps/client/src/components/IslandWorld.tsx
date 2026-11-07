@@ -338,10 +338,8 @@ function Avatar({
         style={{ pointerEvents: "none" }}
       >
         <span
-          className={`whitespace-nowrap rounded-full px-1.5 py-0.5 text-[10px] font-semibold shadow-sm ${
-            isLocal
-              ? "bg-blue-600/90 text-white"
-              : "bg-white/90 text-slate-700"
+          className={`whitespace-nowrap rounded-full border-2 border-ink px-2 py-0.5 text-[10px] font-extrabold tracking-tight shadow-[2px_2px_0_var(--color-ink)] ${
+            isLocal ? "bg-mustard text-ink" : "bg-cream text-ink"
           }`}
         >
           {isLocal ? "You" : id.slice(0, 6)}

@@ -2,7 +2,9 @@ import { Loader2 } from "lucide-react";
 import type { OutgoingStatus } from "@p2p-chat/types";
 
 // ---------------------------------------------------------------------------
-// Outgoing invitation modal – shown after clicking an avatar
+// Invitation modals, Buoy style: a sticker card on cream paper, ink outline,
+// hard offset shadow, with the destructive/hopeful actions colour-coded
+// (coral = send, teal = accept).
 // ---------------------------------------------------------------------------
 
 interface OutgoingModalProps {
@@ -20,33 +22,33 @@ export function OutgoingInvitationModal({
   onCancel,
 }: OutgoingModalProps) {
   return (
-    <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm mx-4 animate-in fade-in">
+    <div className="absolute inset-0 z-50 flex items-center justify-center bg-ink/35 p-4 backdrop-blur-sm">
+      <div className="buoy-card w-full max-w-sm p-6">
         {/* ── Confirm screen ── */}
         {status === "idle" && (
           <>
-            <h3 className="text-lg font-bold text-slate-800 mb-1">
-              Send Chat Invitation?
+            <h3 className="text-xl font-black tracking-tight">
+              Send an invitation?
             </h3>
-            <p className="text-slate-500 text-sm mb-5">
-              Invite user{" "}
-              <span className="font-mono font-semibold text-slate-700">
+            <p className="mt-1.5 mb-5 text-sm font-medium text-ink/70">
+              Invite{" "}
+              <span className="font-mono font-bold text-ink">
                 {targetId.slice(0, 6)}
               </span>{" "}
-              to a private chat
+              to a private chat.
             </p>
-            <div className="flex gap-3">
+            <div className="flex gap-2.5">
               <button
                 onClick={onCancel}
-                className="flex-1 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-medium transition-colors"
+                className="sticker-btn flex-1 bg-cream px-4 py-2.5 text-sm text-ink"
               >
                 Cancel
               </button>
               <button
                 onClick={onSend}
-                className="flex-1 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium transition-colors"
+                className="sticker-btn flex-1 bg-coral px-4 py-2.5 text-sm text-cream"
               >
-                Send Request
+                Send request
               </button>
             </div>
           </>
@@ -54,16 +56,15 @@ export function OutgoingInvitationModal({
 
         {/* ── Waiting for response ── */}
         {status === "waiting" && (
-          <div className="flex flex-col items-center py-4">
-            <Loader2 className="w-8 h-8 text-blue-600 animate-spin mb-3" />
-            <p className="text-sm font-medium text-slate-700">
+          <div className="flex flex-col items-center py-2">
+            <Loader2 className="mb-3 h-8 w-8 animate-spin text-coral" />
+            <p className="text-sm font-bold">
               Waiting for{" "}
-              <span className="font-mono">{targetId.slice(0, 6)}</span> to
-              respond…
+              <span className="font-mono">{targetId.slice(0, 6)}</span>…
             </p>
             <button
               onClick={onCancel}
-              className="mt-4 px-5 py-2 text-sm text-slate-500 hover:text-slate-700 transition-colors"
+              className="sticker-btn mt-4 bg-cream px-5 py-2 text-sm text-ink"
             >
               Cancel
             </button>
@@ -72,16 +73,14 @@ export function OutgoingInvitationModal({
 
         {/* ── Timed out ── */}
         {status === "timeout" && (
-          <div className="flex flex-col items-center py-4">
-            <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center mb-3">
-              <span className="text-amber-600 text-lg">⏱</span>
+          <div className="flex flex-col items-center py-2">
+            <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-full border-2 border-ink bg-mustard text-lg">
+              ⏱
             </div>
-            <p className="text-sm font-medium text-slate-700 mb-4">
-              User did not respond
-            </p>
+            <p className="mb-4 text-sm font-bold">No answer yet.</p>
             <button
               onClick={onCancel}
-              className="px-6 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-medium transition-colors"
+              className="sticker-btn bg-cream px-6 py-2.5 text-sm text-ink"
             >
               Close
             </button>
@@ -90,16 +89,14 @@ export function OutgoingInvitationModal({
 
         {/* ── Declined ── */}
         {status === "declined" && (
-          <div className="flex flex-col items-center py-4">
-            <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center mb-3">
-              <span className="text-red-500 text-lg">✕</span>
+          <div className="flex flex-col items-center py-2">
+            <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-full border-2 border-ink bg-coral text-lg text-ink">
+              ✕
             </div>
-            <p className="text-sm font-medium text-slate-700 mb-4">
-              User declined your invitation
-            </p>
+            <p className="mb-4 text-sm font-bold">They declined.</p>
             <button
               onClick={onCancel}
-              className="px-6 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-medium transition-colors"
+              className="sticker-btn bg-cream px-6 py-2.5 text-sm text-ink"
             >
               Close
             </button>
@@ -126,39 +123,39 @@ export function IncomingInvitationModal({
   onDecline,
 }: IncomingModalProps) {
   return (
-    <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm mx-4 animate-in fade-in">
-        <div className="flex items-center gap-3 mb-4">
-          <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
-            <span className="text-blue-600 text-lg">💬</span>
+    <div className="absolute inset-0 z-50 flex items-center justify-center bg-ink/35 p-4 backdrop-blur-sm">
+      <div className="buoy-card w-full max-w-sm p-6">
+        <div className="mb-4 flex items-center gap-3">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border-2 border-ink bg-mustard text-lg">
+            💬
           </div>
-          <div>
-            <h3 className="text-lg font-bold text-slate-800">
-              Incoming Chat Request
+          <div className="min-w-0">
+            <h3 className="text-xl leading-tight font-black tracking-tight">
+              Chat request
             </h3>
-            <p className="text-slate-500 text-sm">
-              From{" "}
-              <span className="font-mono font-semibold text-slate-700">
+            <p className="text-sm font-medium text-ink/70">
+              from{" "}
+              <span className="font-mono font-bold text-ink">
                 {fromId.slice(0, 6)}
               </span>
             </p>
           </div>
         </div>
 
-        <p className="text-sm text-slate-600 mb-5">
-          This user wants to start a private chat with you.
+        <p className="mb-5 text-sm font-medium text-ink/70">
+          They want to open a direct, peer-to-peer chat with you.
         </p>
 
-        <div className="flex gap-3">
+        <div className="flex gap-2.5">
           <button
             onClick={onDecline}
-            className="flex-1 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-medium transition-colors"
+            className="sticker-btn flex-1 bg-cream px-4 py-2.5 text-sm text-ink"
           >
             Decline
           </button>
           <button
             onClick={onAccept}
-            className="flex-1 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-medium transition-colors"
+            className="sticker-btn flex-1 bg-teal px-4 py-2.5 text-sm text-ink"
           >
             Accept
           </button>

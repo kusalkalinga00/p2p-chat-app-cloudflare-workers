@@ -11,7 +11,12 @@ interface PrivateChatProps {
 }
 
 // ---------------------------------------------------------------------------
-// PrivateChat component – full-screen 2D chat UI
+// PrivateChat – a card docked over the still-running world.
+//
+// It used to replace the whole screen, which meant the island vanished the
+// moment you started talking and had to be rebuilt when you left. As an
+// overlay the scene keeps rendering underneath: on desktop you keep the world
+// in view, and on phones it expands to the full viewport.
 // ---------------------------------------------------------------------------
 
 export function PrivateChat({
@@ -40,166 +45,171 @@ export function PrivateChat({
     setDraft("");
   };
 
-  // Connection status badge
   const statusConfig: Record<
     RtcStatus,
     { icon: React.ReactNode; label: string; cls: string }
   > = {
     connecting: {
-      icon: <Loader2 className="w-3.5 h-3.5 animate-spin" />,
-      label: "Connecting…",
-      cls: "text-amber-600 bg-amber-50",
+      icon: <Loader2 className="h-3 w-3 animate-spin" />,
+      label: "connecting",
+      cls: "bg-mustard text-ink",
     },
     connected: {
-      icon: <Wifi className="w-3.5 h-3.5" />,
-      label: "P2P Connected",
-      cls: "text-emerald-600 bg-emerald-50",
+      icon: <Wifi className="h-3 w-3" />,
+      label: "p2p connected",
+      cls: "bg-teal text-ink",
     },
     disconnected: {
-      icon: <WifiOff className="w-3.5 h-3.5" />,
-      label: "Disconnected",
-      cls: "text-slate-500 bg-slate-100",
+      icon: <WifiOff className="h-3 w-3" />,
+      label: "disconnected",
+      cls: "bg-ink/15 text-ink",
     },
     failed: {
-      icon: <WifiOff className="w-3.5 h-3.5" />,
-      label: "Connection Failed",
-      cls: "text-red-600 bg-red-50",
+      icon: <WifiOff className="h-3 w-3" />,
+      label: "failed",
+      cls: "bg-coral text-ink",
     },
   };
 
   const badge = statusConfig[rtcStatus];
 
   return (
-    <div className="relative w-full h-dvh min-h-dvh flex flex-col bg-slate-50 overflow-hidden">
-      {/* ── Header ── */}
-      <header className="flex items-center justify-between px-4 py-3 bg-white border-b border-slate-200 shadow-sm">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-full bg-blue-100 flex items-center justify-center">
-            <span className="text-blue-600 font-bold text-sm">
-              {peerId.slice(0, 2).toUpperCase()}
-            </span>
-          </div>
-          <div>
-            <h2 className="text-sm font-semibold text-slate-800">
-              Chat with <span className="font-mono">{peerId.slice(0, 8)}</span>
+    <div className="pointer-events-none fixed inset-0 z-40 flex items-end justify-start md:p-6">
+      <div className="pointer-events-auto flex h-dvh w-full flex-col overflow-hidden bg-cream md:h-[520px] md:max-h-[calc(100dvh-3rem)] md:w-[392px] md:rounded-[22px] md:border-2 md:border-ink md:shadow-[6px_6px_0_var(--color-ink)]">
+        {/* ── Header ── */}
+        <header className="flex items-center justify-between gap-3 border-b-2 border-ink bg-mustard px-4 py-3">
+          <div className="min-w-0">
+            <p className="font-mono text-[9px] font-bold tracking-[0.18em] uppercase text-ink/60">
+              private channel
+            </p>
+            <h2 className="truncate text-lg font-black tracking-tight">
+              {peerId.slice(0, 8)}
             </h2>
-            <div
-              className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full ${badge.cls}`}
+          </div>
+
+          <div className="flex shrink-0 items-center gap-2">
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full border-2 border-ink px-2.5 py-1 font-mono text-[9px] font-bold tracking-[0.1em] uppercase ${badge.cls}`}
             >
               {badge.icon}
               {badge.label}
-            </div>
-          </div>
-        </div>
+            </span>
 
-        <button
-          onClick={onLeave}
-          className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors"
-        >
-          <LogOut className="w-4 h-4" />
-          Leave
-        </button>
-      </header>
-
-      {/* ── Messages ── */}
-      <div
-        ref={scrollRef}
-        className="flex-1 overflow-y-auto px-4 py-4 pb-6 space-y-3"
-      >
-        {messages.length === 0 && rtcStatus === "connected" && (
-          <p className="text-center text-sm text-slate-400 mt-8">
-            Connection established — say hello! 👋
-          </p>
-        )}
-
-        {messages.length === 0 && rtcStatus === "connecting" && (
-          <div className="flex flex-col items-center mt-12 gap-2">
-            <Loader2 className="w-6 h-6 text-blue-500 animate-spin" />
-            <p className="text-sm text-slate-400">
-              Establishing peer-to-peer connection…
-            </p>
-          </div>
-        )}
-
-        {messages.map((msg) => (
-          <div
-            key={msg.id}
-            className={`flex ${msg.from === "me" ? "justify-end" : "justify-start"}`}
-          >
-            <div
-              className={`max-w-[75%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${
-                msg.from === "me"
-                  ? "bg-blue-600 text-white rounded-br-md"
-                  : "bg-white text-slate-800 border border-slate-200 rounded-bl-md shadow-sm"
-              }`}
-            >
-              {msg.text}
-              <span
-                className={`block text-[10px] mt-1 ${
-                  msg.from === "me" ? "text-blue-200" : "text-slate-400"
-                }`}
-              >
-                {new Date(msg.timestamp).toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
-              </span>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* ── Input ── */}
-      <form
-        onSubmit={handleSubmit}
-        className="sticky bottom-0 z-10 flex items-center gap-2 px-4 pt-3 bg-white border-t border-slate-200"
-        style={{
-          paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 0.75rem)",
-        }}
-      >
-        <input
-          type="text"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder={
-            rtcStatus === "connected"
-              ? "Type a message…"
-              : "Waiting for connection…"
-          }
-          disabled={rtcStatus !== "connected"}
-          className="flex-1 px-4 py-2.5 text-sm rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50 placeholder:text-slate-400"
-        />
-        <button
-          type="submit"
-          disabled={rtcStatus !== "connected" || !draft.trim()}
-          className="p-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white transition-colors"
-        >
-          <Send className="w-4 h-4" />
-        </button>
-      </form>
-
-      {/* ── Failed overlay ── */}
-      {rtcStatus === "failed" && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm mx-4 text-center">
-            <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center mx-auto mb-3">
-              <WifiOff className="w-6 h-6 text-red-500" />
-            </div>
-            <h3 className="text-lg font-bold text-slate-800 mb-1">
-              Connection Failed
-            </h3>
-            <p className="text-sm text-slate-500 mb-5">
-              Could not establish a peer-to-peer connection.
-            </p>
             <button
               onClick={onLeave}
-              className="px-6 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-medium transition-colors"
+              className="sticker-btn h-9 w-9 bg-cream text-ink"
+              aria-label="Leave chat"
+              title="Leave chat"
             >
-              Return to World
+              <LogOut className="h-4 w-4" />
             </button>
           </div>
+        </header>
+
+        {/* ── Messages ── */}
+        <div
+          ref={scrollRef}
+          className="flex flex-1 flex-col gap-2.5 overflow-y-auto px-3.5 py-3.5"
+        >
+          {messages.length === 0 && rtcStatus === "connected" && (
+            <>
+              <div className="flex-1" />
+              <p className="text-center text-[13px] font-bold text-ink/60">
+                connection established — say hello 👋
+              </p>
+            </>
+          )}
+
+          {messages.length === 0 && rtcStatus === "connecting" && (
+            <>
+              <div className="flex-1" />
+              <div className="flex flex-col items-center gap-2">
+                <Loader2 className="h-6 w-6 animate-spin text-coral" />
+                <p className="text-[13px] font-bold text-ink/60">
+                  shaking hands, peer to peer…
+                </p>
+              </div>
+            </>
+          )}
+
+          {messages.map((msg) => {
+            const mine = msg.from === "me";
+            return (
+              <div
+                key={msg.id}
+                className={`max-w-[84%] rounded-2xl border-2 border-ink px-3.5 py-2 text-[13.5px] leading-relaxed font-medium ${
+                  mine
+                    ? "self-end rounded-br-[4px] bg-coral text-ink"
+                    : "self-start rounded-bl-[4px] bg-white text-ink"
+                }`}
+              >
+                {msg.text}
+                <span
+                  className={`mt-1 block font-mono text-[9.5px] tracking-wide ${
+                    mine ? "text-ink/60" : "text-ink/60"
+                  }`}
+                >
+                  {new Date(msg.timestamp).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </span>
+              </div>
+            );
+          })}
         </div>
-      )}
+
+        {/* ── Composer ── */}
+        <form
+          onSubmit={handleSubmit}
+          className="flex items-center gap-2 border-t-2 border-ink bg-white px-2.5 pt-2.5"
+          style={{
+            paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 0.625rem)",
+          }}
+        >
+          <input
+            type="text"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder={
+              rtcStatus === "connected"
+                ? "say something…"
+                : "waiting for connection…"
+            }
+            disabled={rtcStatus !== "connected"}
+            className="buoy-input min-w-0 flex-1 px-3.5 py-2.5 text-sm font-medium"
+          />
+          <button
+            type="submit"
+            disabled={rtcStatus !== "connected" || !draft.trim()}
+            className="sticker-btn h-10 w-10 shrink-0 bg-coral text-ink"
+            aria-label="Send message"
+          >
+            <Send className="h-4 w-4" />
+          </button>
+        </form>
+
+        {/* ── Failed overlay ── */}
+        {rtcStatus === "failed" && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-ink/35 p-4 backdrop-blur-sm md:rounded-[20px]">
+            <div className="buoy-card w-full max-w-sm p-6 text-center">
+              <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full border-2 border-ink bg-coral">
+                <WifiOff className="h-6 w-6 text-ink" />
+              </div>
+              <h3 className="text-lg font-black">Connection failed</h3>
+              <p className="mt-1 mb-5 text-sm font-medium text-ink/70">
+                Could not reach your peer directly.
+              </p>
+              <button
+                onClick={onLeave}
+                className="sticker-btn bg-cream px-6 py-2.5 text-sm text-ink"
+              >
+                Back to the island
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
