@@ -12,13 +12,10 @@ updates:
         dependency-type: development
       runtime:
         dependency-type: production
-    ignore:
-      # drei 10.7.8 and 10.7.9 break troika's text worker in a production build:
-      # "init did not return a callable function", which unmounts the whole
-      # scene and leaves a blank canvas. 10.7.7 renders. Drop this once a later
-      # version is confirmed working.
-      - dependency-name: "@react-three/drei"
-        versions: ["10.7.8", "10.7.9"]
+    # @react-three/drei is pinned to 10.7.7 in apps/client: 10.7.8/10.7.9 changed
+    # its troika text path, which blanked the scene. The app no longer uses
+    # troika (labels are DOM), so a bump is worth re-evaluating by hand rather
+    # than ignoring outright — the pin in package.json holds it until then.
 
   # Keeps CI actions pinned to fresh commit SHAs.
   - package-ecosystem: github-actions

@@ -1,5 +1,5 @@
 import type { IceConfigResponse, IceServer } from "@p2p-chat/types";
-import { WORLD_WSS_URL } from "./constants";
+import { WORLD_ORIGIN } from "./constants";
 
 /**
  * ICE configuration is fetched from the Worker rather than bundled, because
@@ -33,23 +33,13 @@ function toConfiguration(iceServers: IceServer[], ttlSeconds: number) {
  * Resolve the ICE configuration to use. Never throws: a failed lookup results
  * in public STUN, which still connects peers on permissive networks.
  */
-/**
- * `VITE_WORLD_WSS_URL` may be configured as `ws://` or `wss://` (the name
- * suggests it, and deployed environments often set it that way). WebSocket
- * accepts that; `fetch` does not — it throws "Failed to fetch" — so the origin
- * has to be converted before requesting `/ice`.
- */
-function httpOrigin(url: string): string {
-  return url.replace(/^ws(s?):\/\//, "http$1://");
-}
-
 export async function getIceConfig(): Promise<RTCConfiguration> {
   if (cache && cache.expiresAt > Date.now()) return cache.config;
   if (inFlight) return inFlight;
 
   inFlight = (async () => {
     try {
-      const response = await fetch(`${httpOrigin(WORLD_WSS_URL)}/ice`, {
+      const response = await fetch(`${WORLD_ORIGIN}/ice`, {
         headers: { Accept: "application/json" },
       });
 
