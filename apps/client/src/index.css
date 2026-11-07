@@ -1,1 +1,131 @@
 @import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   Buoy — design tokens
+
+   The palette is taken from the world itself: cream paper, near-black ink,
+   and the coral / mustard / teal that the low-poly props already use. Chrome
+   is deliberately drawn like a sticker stuck onto the scene (2px ink border,
+   hard offset shadow) rather than a floating card, so it reads as part of the
+   toy instead of a UI layer sitting on top of it.
+   --------------------------------------------------------------------------- */
+
+@theme {
+  --color-cream: #fff9f0;
+  --color-ink: #171310;
+  --color-coral: #ff5a36;
+  --color-mustard: #ffc145;
+  --color-teal: #1f9d8b;
+
+  --font-rounded:
+    ui-rounded, "SF Pro Rounded", "Segoe UI", system-ui, -apple-system, sans-serif;
+
+  --shadow-sticker: 3px 3px 0 var(--color-ink);
+  --shadow-card: 6px 6px 0 var(--color-ink);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background-color: var(--color-cream);
+    color: var(--color-ink);
+    font-family: var(--font-rounded);
+  }
+
+  /* Rounded, heavy sans everywhere; nothing in this UI needs a serif. */
+  button,
+  input {
+    font-family: inherit;
+  }
+
+  ::selection {
+    background: var(--color-mustard);
+    color: var(--color-ink);
+  }
+}
+
+@layer components {
+  /* A pill of cream paper with a fat ink outline and a hard shadow. */
+  .sticker {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    border: 2px solid var(--color-ink);
+    border-radius: 999px;
+    background: var(--color-cream);
+    color: var(--color-ink);
+    box-shadow: 3px 3px 0 var(--color-ink);
+  }
+
+  .sticker-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    border: 2px solid var(--color-ink);
+    border-radius: 999px;
+    font-weight: 800;
+    box-shadow: 3px 3px 0 var(--color-ink);
+    transition:
+      transform 80ms ease,
+      box-shadow 80ms ease,
+      background-color 120ms ease;
+  }
+
+  .sticker-btn:hover:not(:disabled) {
+    transform: translate(-1px, -1px);
+    box-shadow: 4px 4px 0 var(--color-ink);
+  }
+
+  /* Pressing a sticker pushes it into the paper. */
+  .sticker-btn:active:not(:disabled) {
+    transform: translate(2px, 2px);
+    box-shadow: 1px 1px 0 var(--color-ink);
+  }
+
+  .sticker-btn:disabled {
+    opacity: 0.55;
+    box-shadow: 3px 3px 0 rgb(23 19 16 / 0.35);
+    cursor: not-allowed;
+  }
+
+  .buoy-card {
+    border: 2px solid var(--color-ink);
+    border-radius: 22px;
+    background: var(--color-cream);
+    box-shadow: var(--shadow-card);
+  }
+
+  .buoy-input {
+    border: 2px solid var(--color-ink);
+    border-radius: 999px;
+    background: #fff;
+    outline: none;
+    transition: box-shadow 120ms ease;
+  }
+
+  .buoy-input:focus {
+    box-shadow: 3px 3px 0 var(--color-mustard);
+  }
+
+  .buoy-input:disabled {
+    background: #f3ece1;
+    cursor: not-allowed;
+  }
+
+  .buoy-input::placeholder {
+    color: rgb(23 19 16 / 0.4);
+  }
+
+  /* Focus ring for keyboard users, suppressed for pointer clicks. */
+  .sticker-btn:focus-visible,
+  .buoy-input:focus-visible {
+    outline: 3px solid var(--color-teal);
+    outline-offset: 2px;
+  }
+}
