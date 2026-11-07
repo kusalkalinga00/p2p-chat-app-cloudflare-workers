@@ -2,6 +2,7 @@
   "name": "@p2p-chat/types",
   "version": "1.0.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Shared wire protocol and view models for the island chat app",
   "main": "./src/index.ts",

@@ -279,3 +279,9 @@ curl -H "Origin: https://p2p-chat-app-cloudflare-workers.pages.dev" \
   peers on different networks.
 - World positions are assigned by the client and rendered by index on a ring;
   there is no movement or collision.
+
+## License
+
+[MIT](LICENSE) © 2026 kusalkalinga00.
+
+Use it, fork it, ship it. Attribution is the only requirement.
