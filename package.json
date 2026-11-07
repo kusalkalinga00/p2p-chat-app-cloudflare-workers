@@ -12,7 +12,6 @@
     "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules pnpm-lock.yaml"
   },
   "devDependencies": {
-    "concurrently": "^8.2.2",
-    "typescript": "^5.3.0"
+    "typescript": "^5.9.3"
   }
 }
