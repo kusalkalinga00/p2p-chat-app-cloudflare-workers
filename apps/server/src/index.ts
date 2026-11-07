@@ -136,10 +136,13 @@ async function mintMeteredCredentials(
   const cached = credentialCache;
   if (cached && cached.expiresAt > Date.now()) return cached.body;
 
+  // Accept either "island-chat" or the full "island-chat.metered.live".
+  const host = env.METERED_APP.replace(/\.metered\.live$/, "");
+
   let response: Response;
   try {
     response = await fetch(
-      `https://${env.METERED_APP}.metered.live/api/v1/turn/credentials?apiKey=${env.METERED_API_KEY}`,
+      `https://${host}.metered.live/api/v1/turn/credentials?apiKey=${env.METERED_API_KEY}`,
     );
   } catch (err) {
     console.error("[turn] metered credential request failed:", err);
