@@ -1,8 +1,9 @@
 # Cloudflare Pages applies these to every response.
 #
 # Content-Security-Policy notes:
-# - script-src 'self'      : no eval, no inline scripts (verified: the bundle
-#                            contains no `new Function` and Vite emits external JS)
+# - script-src 'self'        : no eval, no inline scripts. Avatar labels are DOM
+#                            (drei <Html>), not troika text, so nothing in the
+#                            scene needs a blob-URL worker.
 # - style-src 'unsafe-inline' : React Three Fiber sets inline styles on the canvas
 #                            and its container, which cannot be hashed
 # - connect-src            : the WebSocket and the /ice lookup both go to the Worker.

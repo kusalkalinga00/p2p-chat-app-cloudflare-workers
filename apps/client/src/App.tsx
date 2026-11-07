@@ -18,7 +18,7 @@ import type {
   User,
   View,
 } from "@p2p-chat/types";
-import { INVITATION_TIMEOUT_MS, WORLD_WSS_URL } from "./lib/constants";
+import { INVITATION_TIMEOUT_MS, WORLD_ORIGIN } from "./lib/constants";
 import { getIceConfig, prefetchIceConfig } from "./lib/ice";
 import { randomColor, randomPosition } from "./lib/utils";
 
@@ -521,7 +521,7 @@ function App() {
     }
 
     setIsConnecting(true);
-    const ws = new WebSocket(`${WORLD_WSS_URL}/world/world?id=${identity.id}`);
+    const ws = new WebSocket(`${WORLD_ORIGIN}/world/world?id=${identity.id}`);
     wsRef.current = ws;
 
     ws.onopen = () => {

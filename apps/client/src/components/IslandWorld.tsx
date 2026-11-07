@@ -1,6 +1,6 @@
 import { useRef, useMemo, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
-import { OrbitControls, Text } from "@react-three/drei";
+import { Html, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import type { User } from "@p2p-chat/types";
 
@@ -324,18 +324,29 @@ function Avatar({
         />
       </mesh>
 
-      {/* Floating name label */}
-      <Text
+      {/* Floating name label.
+          Rendered as DOM rather than troika text: troika builds its renderer in
+          a blob-URL worker, and under a Content-Security-Policy that worker
+          fails silently, which leaves the font promise pending and suspends this
+          component — taking the entire scene with it. DOM labels need neither a
+          worker nor a font fetch, so the CSP can stay strict. */}
+      <Html
+        center
         position={[0, 0.68, 0]}
-        fontSize={0.22}
-        color={isLocal ? "#3B82F6" : "#1F2937"}
-        anchorX="center"
-        anchorY="bottom"
-        outlineWidth={0.02}
-        outlineColor="#ffffff"
+        distanceFactor={9}
+        zIndexRange={[10, 0]}
+        style={{ pointerEvents: "none" }}
       >
-        {isLocal ? "You" : id.slice(0, 6)}
-      </Text>
+        <span
+          className={`whitespace-nowrap rounded-full px-1.5 py-0.5 text-[10px] font-semibold shadow-sm ${
+            isLocal
+              ? "bg-blue-600/90 text-white"
+              : "bg-white/90 text-slate-700"
+          }`}
+        >
+          {isLocal ? "You" : id.slice(0, 6)}
+        </span>
+      </Html>
 
 
       {/* Availability status dot */}
