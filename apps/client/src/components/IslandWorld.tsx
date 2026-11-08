@@ -1,6 +1,7 @@
-import { useLayoutEffect, useRef, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useMemo, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
-import { Html, OrbitControls } from "@react-three/drei";
+import { OrbitControls } from "@react-three/drei";
+import { useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import type { User } from "@p2p-chat/types";
 
@@ -820,14 +821,12 @@ function AvailabilityRing({ available }: { available: boolean }) {
 function Avatar({
   position,
   color,
-  id,
   isLocal = false,
   available = true,
   onClick,
 }: {
   position: [number, number, number];
   color: string;
-  id: string;
   isLocal?: boolean;
   available?: boolean;
   onClick?: () => void;
@@ -867,29 +866,115 @@ function Avatar({
         <Character color={color} />
       </group>
 
-      {/* Floating name label.
-          Rendered as DOM rather than troika text: troika builds its renderer in
-          a blob-URL worker, and under a Content-Security-Policy that worker
-          fails silently, which leaves the font promise pending and suspends this
-          component — taking the entire scene with it. DOM labels need neither a
-          worker nor a font fetch, so the CSP can stay strict. */}
-      <Html
-        center
-        position={[0, 1.38, 0]}
-        distanceFactor={11}
-        zIndexRange={[10, 0]}
-        style={{ pointerEvents: "none" }}
-      >
-        <span
-          className={`whitespace-nowrap rounded-full border-2 border-ink px-3 py-1 text-[12px] font-extrabold tracking-tight shadow-[2px_2px_0_var(--color-ink)] ${
-            isLocal ? "bg-mustard text-ink" : "bg-cream text-ink"
-          }`}
-        >
-          {isLocal ? "You" : id.slice(0, 6)}
-        </span>
-      </Html>
+      {/* The name label is drawn by <WorldLabels> in a DOM overlay above the
+          canvas. drei's <Html> was used here and proved unreliable in this
+          stack: instances silently vanished from the DOM, taking labels with
+          them, and React logged "attempted to synchronously unmount a root
+          while React was already rendering" on every mount. */}
     </group>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Name labels — a DOM overlay projected from the camera
+// ---------------------------------------------------------------------------
+//
+// drei's <Html> created and tore down a React root per label, which in this
+// stack left labels missing from the DOM entirely. These are plain elements in
+// an overlay above the canvas, positioned by projecting a world point through
+// the camera each frame — no portal, no extra root, nothing to unmount.
+
+const LABEL_BASE =
+  "absolute left-0 top-0 whitespace-nowrap rounded-full border-2 border-ink px-3 py-1 text-[12px] font-extrabold tracking-tight shadow-[2px_2px_0_var(--color-ink)]";
+
+interface LabelItem {
+  id: string;
+  label: string;
+  position: [number, number, number];
+  isLocal: boolean;
+}
+
+function WorldLabels({
+  items,
+  overlay,
+}: {
+  items: LabelItem[];
+  overlay: { current: HTMLDivElement | null };
+}) {
+  const { camera } = useThree();
+  const nodes = useRef(new Map<string, HTMLSpanElement>());
+  const projected = useMemo(() => new THREE.Vector3(), []);
+
+  // Create, update and remove the elements alongside the item list.
+  useEffect(() => {
+    const container = overlay.current;
+    if (!container) return;
+
+    const seen = new Set<string>();
+    for (const item of items) {
+      seen.add(item.id);
+      const className = `${LABEL_BASE} ${item.isLocal ? "bg-mustard text-ink" : "bg-cream text-ink"}`;
+      let el = nodes.current.get(item.id);
+      if (!el) {
+        el = document.createElement("span");
+        container.appendChild(el);
+        nodes.current.set(item.id, el);
+      }
+      el.className = className;
+      el.textContent = item.label;
+    }
+
+    for (const [id, el] of nodes.current) {
+      if (!seen.has(id)) {
+        el.remove();
+        nodes.current.delete(id);
+      }
+    }
+  }, [items, overlay]);
+
+  useFrame(() => {
+    const container = overlay.current;
+    if (!container) return;
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+
+    for (const item of items) {
+      const el = nodes.current.get(item.id);
+      if (!el) continue;
+
+      projected
+        .set(item.position[0], item.position[1] + 1.45, item.position[2])
+        .project(camera);
+
+      // Behind the camera, or far outside the viewport: hide rather than draw
+      // a mirrored label at the wrong place.
+      if (projected.z > 1) {
+        el.style.display = "none";
+        continue;
+      }
+
+      el.style.display = "";
+      const x = (projected.x * 0.5 + 0.5) * width;
+      const y = (-projected.y * 0.5 + 0.5) * height;
+
+      // Shrink slightly with distance, like a diegetic tag would.
+      const distance = camera.position.distanceTo(
+        projected.set(item.position[0], item.position[1], item.position[2]),
+      );
+      const scale = THREE.MathUtils.clamp(16 / distance, 0.62, 1.15);
+
+      // Position with left/top and centre with a single transform. Putting the
+      // positional translate in the same transform list let the per-label
+      // scale multiply the -50% centring, so labels at different distances were
+      // offset from their characters by different amounts.
+      el.style.left = `${x.toFixed(1)}px`;
+      el.style.top = `${y.toFixed(1)}px`;
+      el.style.transformOrigin = "50% 100%";
+      el.style.transform = `translate(-50%, -100%) scale(${scale.toFixed(2)})`;
+    }
+  });
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1023,10 +1108,22 @@ export function IslandWorld({
     MAIN_ISLAND.z,
   ];
 
+  const overlayRef = useRef<HTMLDivElement>(null);
+
+  const labelItems: LabelItem[] = [
+    { id: myId, label: "You", position: localAvatarPosition, isLocal: true },
+    ...remoteUsers.map((user, index) => ({
+      id: user.id,
+      label: user.id.slice(0, 6),
+      position: remoteAvatarPositions[index],
+      isLocal: false,
+    })),
+  ];
+
   void myPosition;
 
   return (
-    <div className="w-full h-screen">
+    <div className="relative h-screen w-full">
       <Canvas
         shadows="percentage"
         camera={{ position: [13, 11, 13], fov: 55 }}
@@ -1077,7 +1174,6 @@ export function IslandWorld({
         <Avatar
           position={localAvatarPosition}
           color={myColor}
-          id={myId}
           isLocal
           available
         />
@@ -1087,14 +1183,21 @@ export function IslandWorld({
             key={user.id}
             position={remoteAvatarPositions[index]}
             color={user.color}
-            id={user.id}
             available={user.available}
             onClick={() => onAvatarClick(user.id)}
           />
         ))}
 
         <Spray count={40} />
+
+        <WorldLabels items={labelItems} overlay={overlayRef} />
       </Canvas>
+
+      {/* Labels live in the DOM, above the canvas. */}
+      <div
+        ref={overlayRef}
+        className="pointer-events-none absolute inset-0 overflow-hidden"
+      />
     </div>
   );
 }
