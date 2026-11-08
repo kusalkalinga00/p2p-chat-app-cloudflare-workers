@@ -2,7 +2,7 @@
 
 **A personal project, built to learn Cloudflare Workers by doing the thing they are least obviously for:** a live 3D world where two strangers can open a private chat that never passes through your server.
 
-[![The island world: floating low-poly islands, two connected users](/readme_assets/world.png)](/readme_assets/world.png)
+[![The island world: a sand island with palms and a lighthouse, two connected users](/readme_assets/world.png)](/readme_assets/world.png)
 
 Two browsers, one Durable Object, and a WebRTC DataChannel. The server signs people in, introduces them, and relays the handshake — then gets out of the way. Messages travel browser to browser, so the Worker that connected you cannot read them.
 
@@ -27,7 +27,7 @@ A world bot explains the one interaction, and three sound effects mark arrivals,
 
 Every image here is the real app, captured from a running instance — no mockups.
 
-| [![The world with two users connected](/readme_assets/world.png)](/readme_assets/world.png) **The world.** Connection state and your short ID top-left, connected-user count top-right, avatars floating over the central island. | [![An incoming chat request dialog](/readme_assets/invite-request.png)](/readme_assets/invite-request.png) **An invitation.** A modal over the blurred island; the sender waits with a 15-second timeout. |
+| [![The world with two users connected](/readme_assets/world.png)](/readme_assets/world.png) **The world.** Who is present top-left, connection state top-right, characters standing on the island among the palms — with a lighthouse to steer by. | [![An incoming chat request dialog](/readme_assets/invite-request.png)](/readme_assets/invite-request.png) **An invitation.** A modal over the blurred island; the sender waits with a 15-second timeout. |
 |---|---|
 
 ---
