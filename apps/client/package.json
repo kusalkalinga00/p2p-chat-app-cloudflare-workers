@@ -8,7 +8,8 @@
     "dev": "vite --port 5173",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test:e2ee": "node scripts/e2ee-smoke.mjs"
   },
   "dependencies": {
     "@p2p-chat/types": "workspace:*",

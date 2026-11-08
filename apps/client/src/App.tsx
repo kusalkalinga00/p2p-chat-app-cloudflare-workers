@@ -20,6 +20,7 @@ import type {
 } from "@p2p-chat/types";
 import { INVITATION_TIMEOUT_MS, WORLD_ORIGIN } from "./lib/constants";
 import { getIceConfig, prefetchIceConfig } from "./lib/ice";
+import { ChatCipher } from "./lib/e2ee";
 import { randomColor, randomPosition } from "./lib/utils";
 
 /** Close code the server uses when a newer connection claims our ID. */
@@ -42,6 +43,10 @@ function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [rtcStatus, setRtcStatus] = useState<RtcStatus>("disconnected");
   const [isBotClosed, setIsBotClosed] = useState(false);
+  /** E2EE handshake finished and message chains are usable. */
+  const [e2eeReady, setE2eeReady] = useState(false);
+  /** Four emoji both sides must see identically; null until derived. */
+  const [safetyString, setSafetyString] = useState<string[] | null>(null);
   const [userChangeMessage, setUserChangeMessage] = useState<string | null>(
     null,
   );
@@ -70,6 +75,9 @@ function App() {
 
   /** ICE candidates that arrived before the remote description was set. */
   const pendingCandidatesRef = useRef<IceCandidate[]>([]);
+
+  /** Per-chat end-to-end encryption state; discarded when the chat ends. */
+  const cipherRef = useRef<ChatCipher | null>(null);
 
   const shouldReconnectRef = useRef(true);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -182,13 +190,52 @@ function App() {
         setRtcStatus("disconnected");
       };
 
-      dc.onmessage = (e) => {
+      dc.onmessage = async (e) => {
+        const cipher = cipherRef.current;
+
+        // Everything on this channel is ciphertext. A frame that is not a
+        // well-formed envelope is dropped rather than shown: never render
+        // unverified bytes as if a peer had sent them.
+        let envelope: { n?: unknown; c?: unknown };
+        try {
+          envelope = JSON.parse(String(e.data));
+        } catch {
+          console.warn("[e2ee] dropped a frame that was not JSON");
+          return;
+        }
+
+        if (
+          !cipher?.ready ||
+          typeof envelope.n !== "number" ||
+          typeof envelope.c !== "string"
+        ) {
+          console.warn("[e2ee] dropped a malformed message envelope");
+          return;
+        }
+
+        let text: string;
+        try {
+          text = await cipher.decrypt({ n: envelope.n, c: envelope.c });
+        } catch (err) {
+          console.warn("[e2ee] decryption failed:", err);
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: crypto.randomUUID(),
+              from: "peer",
+              text: "⚠️ A message arrived that could not be decrypted.",
+              timestamp: Date.now(),
+            },
+          ]);
+          return;
+        }
+
         setMessages((prev) => [
           ...prev,
           {
             id: crypto.randomUUID(),
             from: "peer",
-            text: String(e.data),
+            text,
             timestamp: Date.now(),
           },
         ]);
@@ -358,6 +405,25 @@ function App() {
       setChatTarget(peerId);
       setMessages([]);
       setView("chat");
+      setE2eeReady(false);
+      setSafetyString(null);
+
+      // Start the E2EE handshake alongside the WebRTC one. The role decides
+      // which of the two derived chains each side sends on, so the two ends
+      // never reuse a key or nonce in the same direction.
+      const roomId = [identity.id, peerId].sort().join("-");
+      const cipher = new ChatCipher(
+        roomId,
+        offerer ? "initiator" : "responder",
+      );
+      cipherRef.current = cipher;
+
+      void cipher
+        .init()
+        .then((publicKey) => {
+          wsSend({ type: "e2ee-key", target: peerId, payload: { publicKey } });
+        })
+        .catch((err) => console.error("[e2ee] key generation failed:", err));
 
       // The offerer kicks off WebRTC negotiations
       if (offerer) {
@@ -365,7 +431,7 @@ function App() {
       }
       // (The answerer waits for the rtc-offer message, handled in handleMessage)
     },
-    [startOffer],
+    [identity.id, startOffer, wsSend],
   );
 
   // ────────────────────────────────────────────────────────────────
@@ -374,6 +440,11 @@ function App() {
 
   const leaveChat = useCallback(() => {
     cleanupRtc();
+    // Drop the keys with the chat: the next conversation is a new session and
+    // gets new ephemeral keys, so past messages cannot be read from this state.
+    cipherRef.current = null;
+    setE2eeReady(false);
+    setSafetyString(null);
     setChatTarget(null);
     setMessages([]);
     setView("world");
@@ -459,6 +530,20 @@ function App() {
 
         case "rtc-ice-candidate":
           void handleIceCandidate(data.payload);
+          break;
+
+        case "e2ee-key":
+          void (async () => {
+            const cipher = cipherRef.current;
+            if (!cipher) return;
+            try {
+              await cipher.derive(data.payload.publicKey);
+              setE2eeReady(cipher.ready);
+              setSafetyString(cipher.safetyString ? [...cipher.safetyString] : null);
+            } catch (err) {
+              console.error("[e2ee] key agreement failed:", err);
+            }
+          })();
           break;
 
         case "peer-left":
@@ -670,12 +755,24 @@ function App() {
   /** Send a chat message over the DataChannel. */
   const sendChatMessage = useCallback((text: string) => {
     const dc = dcRef.current;
-    if (!dc || dc.readyState !== "open") return;
-    dc.send(text);
+    const cipher = cipherRef.current;
+    // No plaintext fallback: if the keys are not ready, nothing is sent.
+    if (!dc || dc.readyState !== "open" || !cipher?.ready) return;
+
+    // Show it locally straight away; the wire only ever sees ciphertext.
     setMessages((prev) => [
       ...prev,
       { id: crypto.randomUUID(), from: "me", text, timestamp: Date.now() },
     ]);
+
+    void cipher
+      .encrypt(text)
+      .then((envelope) => {
+        if (dc.readyState === "open") {
+          dc.send(JSON.stringify({ v: 1, ...envelope }));
+        }
+      })
+      .catch((err) => console.error("[e2ee] encryption failed:", err));
   }, []);
 
   const worldBotMessage = notice
@@ -819,6 +916,7 @@ function App() {
           rtcStatus={rtcStatus}
           onSend={sendChatMessage}
           onLeave={leaveChat}
+          e2ee={{ ready: e2eeReady, safety: safetyString }}
         />
       )}
     </div>

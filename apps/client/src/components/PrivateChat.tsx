@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, LogOut, Wifi, WifiOff, Loader2 } from "lucide-react";
+import { Send, LogOut, Wifi, WifiOff, Loader2, Lock } from "lucide-react";
 import type { ChatMessage, RtcStatus } from "@p2p-chat/types";
 
 interface PrivateChatProps {
@@ -8,6 +8,8 @@ interface PrivateChatProps {
   rtcStatus: RtcStatus;
   onSend: (text: string) => void;
   onLeave: () => void;
+  /** End-to-end encryption state for this chat. */
+  e2ee: { ready: boolean; safety: string[] | null };
 }
 
 // ---------------------------------------------------------------------------
@@ -25,8 +27,10 @@ export function PrivateChat({
   rtcStatus,
   onSend,
   onLeave,
+  e2ee,
 }: PrivateChatProps) {
   const [draft, setDraft] = useState("");
+  const [showSafety, setShowSafety] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to bottom when new messages arrive
@@ -106,6 +110,42 @@ export function PrivateChat({
           </div>
         </header>
 
+        {/* ── Encryption strip ── */}
+        <button
+          type="button"
+          onClick={() => setShowSafety((open) => !open)}
+          className="flex w-full items-center justify-between gap-2 border-b-2 border-ink bg-cream px-4 py-2 text-left"
+        >
+          <span className="flex items-center gap-2 font-mono text-[9px] font-bold tracking-[0.14em] uppercase text-ink/60">
+            <Lock className="h-3 w-3" />
+            {e2ee.ready ? "end-to-end encrypted" : "securing channel…"}
+          </span>
+          <span className="text-base leading-none tracking-[0.08em]">
+            {e2ee.ready && e2ee.safety ? e2ee.safety.join("") : ""}
+          </span>
+        </button>
+
+        {showSafety && (
+          <div className="border-b-2 border-ink bg-mustard/40 px-4 py-3 text-[12px] leading-relaxed font-medium text-ink/80">
+            {e2ee.ready && e2ee.safety ? (
+              <>
+                Read these four with{" "}
+                <span className="font-mono font-bold">
+                  {peerId.slice(0, 8)}
+                </span>{" "}
+                — on a call, or in the room. You must both see the same four, in
+                the same order. If they differ, someone is sitting between you;
+                leave the chat.
+              </>
+            ) : (
+              <>
+                Keys are being exchanged. Messages cannot be sent until this
+                finishes, and are never sent unencrypted.
+              </>
+            )}
+          </div>
+        )}
+
         {/* ── Messages ── */}
         <div
           ref={scrollRef}
@@ -172,16 +212,18 @@ export function PrivateChat({
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             placeholder={
-              rtcStatus === "connected"
-                ? "say something…"
-                : "waiting for connection…"
+              rtcStatus !== "connected"
+                ? "waiting for connection…"
+                : e2ee.ready
+                  ? "say something…"
+                  : "securing channel…"
             }
-            disabled={rtcStatus !== "connected"}
+            disabled={rtcStatus !== "connected" || !e2ee.ready}
             className="buoy-input min-w-0 flex-1 px-3.5 py-2.5 text-sm font-medium"
           />
           <button
             type="submit"
-            disabled={rtcStatus !== "connected" || !draft.trim()}
+            disabled={rtcStatus !== "connected" || !e2ee.ready || !draft.trim()}
             className="sticker-btn h-10 w-10 shrink-0 bg-coral text-ink"
             aria-label="Send message"
           >
