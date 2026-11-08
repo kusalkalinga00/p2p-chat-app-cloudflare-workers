@@ -17,6 +17,8 @@ import type { User } from "@p2p-chat/types";
 
 const INK = "#171310";
 const CREAM = "#fff9f0";
+const CORAL = "#ff5a36";
+const MUSTARD = "#ffc145";
 const TEAL = "#1f9d8b";
 
 // Tints for large 3D surfaces, where the full-strength colours would swallow
@@ -68,6 +70,13 @@ function mulberry32(seed: number) {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+/** Overshoot easing: runs past 1 before settling, which is what sells a pop. */
+function easeOutBack(x: number) {
+  const c1 = 1.70158;
+  const c3 = c1 + 1;
+  return 1 + c3 * (x - 1) ** 3 + c1 * (x - 1) ** 2;
 }
 
 type Shoreline = { k: number; amp: number; phase: number }[];
@@ -603,6 +612,8 @@ interface IslandConfig {
    * hides the player and clips through the model.
    */
   clearRadius?: number;
+  /** Local x/z for a lighthouse, and a radius the scatter avoids around it. */
+  lighthouseAt?: [number, number];
 }
 
 function Island({ config }: { config: IslandConfig }) {
@@ -617,6 +628,7 @@ function Island({ config }: { config: IslandConfig }) {
     rocks = 0,
     bushes = 0,
     clearRadius = 0,
+    lighthouseAt,
   } = config;
 
   const geometry = useMemo(
@@ -628,19 +640,29 @@ function Island({ config }: { config: IslandConfig }) {
   const scatter = useMemo(() => {
     const rnd = mulberry32(seed * 104729 + 7);
     const place = (minFrac: number) => {
-      const angle = rnd() * Math.PI * 2;
-      const rr = Math.max(
-        clearRadius,
-        radius *
-          minFrac *
-          shoreFactor(geometry.shoreline, angle) *
-          (0.75 + rnd() * 0.25),
-      );
-      return [Math.cos(angle) * rr, topY, Math.sin(angle) * rr] as [
-        number,
-        number,
-        number,
-      ];
+      let x = 0;
+      let z = 0;
+      // Resample rather than nudge: a palm dropped on the lighthouse looks
+      // worse than one fewer palm.
+      for (let attempt = 0; attempt < 12; attempt++) {
+        const angle = rnd() * Math.PI * 2;
+        const rr = Math.max(
+          clearRadius,
+          radius *
+            minFrac *
+            shoreFactor(geometry.shoreline, angle) *
+            (0.75 + rnd() * 0.25),
+        );
+        x = Math.cos(angle) * rr;
+        z = Math.sin(angle) * rr;
+        if (
+          !lighthouseAt ||
+          Math.hypot(x - lighthouseAt[0], z - lighthouseAt[1]) > 2.8
+        ) {
+          break;
+        }
+      }
+      return [x, topY, z] as [number, number, number];
     };
 
     return {
@@ -658,7 +680,17 @@ function Island({ config }: { config: IslandConfig }) {
         scale: 0.7 + rnd() * 0.5,
       })),
     };
-  }, [clearRadius, geometry.shoreline, palms, radius, rocks, bushes, seed, topY]);
+  }, [
+    clearRadius,
+    geometry.shoreline,
+    lighthouseAt,
+    palms,
+    radius,
+    rocks,
+    bushes,
+    seed,
+    topY,
+  ]);
 
   return (
     <group position={[x, 0, z]}>
@@ -701,6 +733,105 @@ function Island({ config }: { config: IslandConfig }) {
       {scatter.bushes.map((bush, i) => (
         <Bush key={`bush-${i}`} position={bush.position} scale={bush.scale} />
       ))}
+
+      {lighthouseAt && (
+        <Lighthouse position={[lighthouseAt[0], topY, lighthouseAt[1]]} />
+      )}
+    </group>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Buoy – a channel marker bobbing in the swell
+// ---------------------------------------------------------------------------
+
+function Buoy({
+  position,
+  seed,
+}: {
+  position: [number, number, number];
+  seed: number;
+}) {
+  const ref = useRef<THREE.Group>(null);
+  const phase = useMemo(() => (seed % 100) / 15, [seed]);
+
+  useFrame(({ clock }) => {
+    const group = ref.current;
+    if (!group) return;
+    const t = clock.elapsedTime;
+    // Bob on the same period as the swell and lean with it, so the markers
+    // look like they are riding the water rather than hovering over it.
+    group.position.y = WATER_Y + 0.16 + Math.sin(t * 1.15 + phase) * 0.11;
+    group.rotation.z = Math.sin(t * 0.95 + phase) * 0.09;
+    group.rotation.x = Math.cos(t * 1.05 + phase * 0.7) * 0.07;
+  });
+
+  return (
+    <group ref={ref} position={position} scale={1.6}>
+      <mesh position={[0, 0.18, 0]} castShadow>
+        <coneGeometry args={[0.26, 0.44, 9]} />
+        <meshToonMaterial color={CORAL} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+      <mesh position={[0, 0.42, 0]} castShadow>
+        <cylinderGeometry args={[0.19, 0.22, 0.14, 9]} />
+        <meshToonMaterial color={CREAM} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+      <mesh position={[0, 0.56, 0]} castShadow>
+        <sphereGeometry args={[0.08, 8, 8]} />
+        <meshToonMaterial
+          color={MUSTARD}
+          gradientMap={TOON_RAMP}
+          flatShading
+        />
+        <InkOutline />
+      </mesh>
+    </group>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Lighthouse – the one landmark on the horizon
+// ---------------------------------------------------------------------------
+
+function Lighthouse({ position }: { position: [number, number, number] }) {
+  return (
+    // Scaled up from the natural prop scale: at one character's height it read
+    // as scenery rather than as the landmark the island is built around.
+    <group position={position} scale={1.85}>
+      {/* tower, in bands so it reads from a distance */}
+      <mesh position={[0, 0.75, 0]} castShadow>
+        <cylinderGeometry args={[0.26, 0.34, 1.5, 10]} />
+        <meshToonMaterial color={CREAM} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+      <mesh position={[0, 0.62, 0]} castShadow>
+        <cylinderGeometry args={[0.3, 0.31, 0.26, 10]} />
+        <meshToonMaterial color={CORAL} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+      {/* gallery and lamp */}
+      <mesh position={[0, 1.56, 0]} castShadow>
+        <cylinderGeometry args={[0.34, 0.3, 0.1, 10]} />
+        <meshToonMaterial color={INK} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+      <mesh position={[0, 1.74, 0]} castShadow>
+        <cylinderGeometry args={[0.22, 0.22, 0.28, 10]} />
+        <meshToonMaterial
+          color={MUSTARD}
+          gradientMap={TOON_RAMP}
+          flatShading
+        />
+        <InkOutline />
+      </mesh>
+      {/* roof */}
+      <mesh position={[0, 1.98, 0]} castShadow>
+        <coneGeometry args={[0.32, 0.3, 10]} />
+        <meshToonMaterial color={CORAL} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
     </group>
   );
 }
@@ -832,12 +963,49 @@ function Avatar({
   onClick?: () => void;
 }) {
   const groupRef = useRef<THREE.Group>(null);
+  const bodyRef = useRef<THREE.Group>(null);
   const [hovered, setHovered] = useState(false);
 
+  // Clock stamp of the last frame, so pointer handlers can schedule an
+  // animation against the same time source the frame loop uses.
+  const nowRef = useRef(0);
+  const bornAt = useRef<number | null>(null);
+  const pressedAt = useRef<number | null>(null);
+
   useFrame(({ clock }) => {
-    if (!groupRef.current) return;
-    const bounce = Math.sin(clock.elapsedTime * 2 + position[0]) * 0.08;
-    groupRef.current.position.y = position[1] + bounce + (hovered ? 0.12 : 0);
+    const outer = groupRef.current;
+    const body = bodyRef.current;
+    if (!outer || !body) return;
+
+    const t = clock.elapsedTime;
+    nowRef.current = t;
+    if (bornAt.current === null) bornAt.current = t;
+
+    const bounce = Math.sin(t * 2 + position[0]) * 0.08;
+    outer.position.y = position[1] + bounce + (hovered ? 0.12 : 0);
+
+    // Arriving pops: scale runs slightly past 1 and settles.
+    const age = t - bornAt.current;
+    const pop = age < 0.45 ? easeOutBack(age / 0.45) : 1;
+    const hover = hovered ? 1.07 : 1;
+
+    // Clicking squashes: wider and shorter for a moment, like a sticker
+    // being pressed into the page.
+    let sx = 1;
+    let sy = 1;
+    if (pressedAt.current !== null) {
+      const progress = (t - pressedAt.current) / 0.2;
+      if (progress >= 1) {
+        pressedAt.current = null;
+      } else {
+        const k = Math.sin(Math.PI * progress);
+        sy = 1 - 0.16 * k;
+        sx = 1 + 0.14 * k;
+      }
+    }
+
+    const base = pop * hover;
+    body.scale.set(base * sx, base * sy, base * sx);
   });
 
   return (
@@ -847,9 +1015,10 @@ function Avatar({
       {/* Handlers sit on the group: R3F bubbles pointer events up from the
           child meshes, so the whole character is one click target. */}
       <group
-        scale={hovered ? 1.07 : 1}
+        ref={bodyRef}
         onClick={(e) => {
           e.stopPropagation();
+          pressedAt.current = nowRef.current;
           if (!isLocal && onClick) onClick();
         }}
         onPointerOver={(e) => {
@@ -1034,6 +1203,9 @@ const MAIN_ISLAND: IslandConfig = {
   segments: 18,
   // The avatar ring reaches ~2.9 units from the centre; scatter starts at 3.4.
   clearRadius: 3.4,
+  // Back-left, away from the default camera, so it frames the island without
+  // standing between the camera and the avatars.
+  lighthouseAt: [-5.0, -3.1],
   palms: 6,
   rocks: 3,
   bushes: 5,
@@ -1061,6 +1233,23 @@ const ISLANDS: IslandConfig[] = (() => {
   }
 
   return list;
+})();
+
+/** Channel markers, placed in the open water around the main island. */
+const BUOYS = (() => {
+  const rnd = mulberry32(99173);
+  return Array.from({ length: 9 }, (_, i) => {
+    const angle = (i / 9) * Math.PI * 2 + 0.4 + rnd() * 0.28;
+    const distance = 7.9 + rnd() * 1.2;
+    return {
+      position: [
+        Math.cos(angle) * distance,
+        WATER_Y + 0.16,
+        Math.sin(angle) * distance,
+      ] as [number, number, number],
+      seed: 500 + i * 41,
+    };
+  });
 })();
 
 // ---------------------------------------------------------------------------
@@ -1186,6 +1375,10 @@ export function IslandWorld({
             available={user.available}
             onClick={() => onAvatarClick(user.id)}
           />
+        ))}
+
+        {BUOYS.map((buoy) => (
+          <Buoy key={buoy.seed} position={buoy.position} seed={buoy.seed} />
         ))}
 
         <Spray count={40} />
