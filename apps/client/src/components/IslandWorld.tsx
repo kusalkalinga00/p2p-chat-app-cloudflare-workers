@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useMemo, useState } from "react";
+import { useLayoutEffect, useRef, useMemo, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import { useThree } from "@react-three/fiber";
@@ -1058,6 +1058,17 @@ function Avatar({
 const LABEL_BASE =
   "absolute left-0 top-0 whitespace-nowrap rounded-full border-2 border-ink px-3 py-1 text-[12px] font-extrabold tracking-tight shadow-[2px_2px_0_var(--color-ink)]";
 
+/**
+ * Live label elements, keyed by user id.
+ *
+ * The spans are rendered by React in the overlay; this map is how the
+ * in-canvas projection loop finds them to position. Sharing DOM nodes beats
+ * creating them from inside the canvas: R3F mounts its children in a separate
+ * root, so anything created there races the overlay's own mount and can end up
+ * attaching to nothing.
+ */
+const LABEL_NODES = new Map<string, HTMLSpanElement>();
+
 interface LabelItem {
   id: string;
   label: string;
@@ -1065,52 +1076,16 @@ interface LabelItem {
   isLocal: boolean;
 }
 
-function WorldLabels({
-  items,
-  overlay,
-}: {
-  items: LabelItem[];
-  overlay: { current: HTMLDivElement | null };
-}) {
+function WorldLabels({ items }: { items: LabelItem[] }) {
   const { camera } = useThree();
-  const nodes = useRef(new Map<string, HTMLSpanElement>());
   const projected = useMemo(() => new THREE.Vector3(), []);
 
-  // Create, update and remove the elements alongside the item list.
-  useEffect(() => {
-    const container = overlay.current;
-    if (!container) return;
-
-    const seen = new Set<string>();
-    for (const item of items) {
-      seen.add(item.id);
-      const className = `${LABEL_BASE} ${item.isLocal ? "bg-mustard text-ink" : "bg-cream text-ink"}`;
-      let el = nodes.current.get(item.id);
-      if (!el) {
-        el = document.createElement("span");
-        container.appendChild(el);
-        nodes.current.set(item.id, el);
-      }
-      el.className = className;
-      el.textContent = item.label;
-    }
-
-    for (const [id, el] of nodes.current) {
-      if (!seen.has(id)) {
-        el.remove();
-        nodes.current.delete(id);
-      }
-    }
-  }, [items, overlay]);
-
-  useFrame(() => {
-    const container = overlay.current;
-    if (!container) return;
-    const width = container.clientWidth;
-    const height = container.clientHeight;
+  useFrame(({ size }) => {
+    const width = size.width;
+    const height = size.height;
 
     for (const item of items) {
-      const el = nodes.current.get(item.id);
+      const el = LABEL_NODES.get(item.id);
       if (!el) continue;
 
       projected
@@ -1299,8 +1274,6 @@ export function IslandWorld({
     MAIN_ISLAND.z,
   ];
 
-  const overlayRef = useRef<HTMLDivElement>(null);
-
   const labelItems: LabelItem[] = [
     { id: myId, label: "You", position: localAvatarPosition, isLocal: true },
     ...remoteUsers.map((user, index) => ({
@@ -1385,14 +1358,27 @@ export function IslandWorld({
 
         <Spray count={40} />
 
-        <WorldLabels items={labelItems} overlay={overlayRef} />
+        <WorldLabels items={labelItems} />
       </Canvas>
 
-      {/* Labels live in the DOM, above the canvas. */}
-      <div
-        ref={overlayRef}
-        className="pointer-events-none absolute inset-0 overflow-hidden"
-      />
+      {/* Labels live in the DOM, above the canvas. React renders them; the
+          in-canvas loop above only writes their positions each frame. */}
+      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        {labelItems.map((item) => (
+          <span
+            key={item.id}
+            ref={(el) => {
+              if (el) LABEL_NODES.set(item.id, el);
+              else LABEL_NODES.delete(item.id);
+            }}
+            className={`${LABEL_BASE} ${
+              item.isLocal ? "bg-mustard text-ink" : "bg-cream text-ink"
+            }`}
+          >
+            {item.label}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }

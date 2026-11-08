@@ -41,6 +41,18 @@ export interface IceConfigResponse {
   ttl?: number;
 }
 
+/**
+ * E2EE public key, exchanged over the signalling relay.
+ *
+ * These keys are *not* trusted — the whole point is that the relay could
+ * substitute them. They are only useful once both sides derive the same
+ * short authentication string and the two people compare it out loud.
+ */
+export interface E2eeKeyPayload {
+  /** base64 SPKI of an ephemeral ECDH P-256 public key. */
+  publicKey: string;
+}
+
 /** ICE payload, structurally compatible with `RTCIceCandidateInit`. */
 export interface IceCandidate {
   candidate: string;
@@ -71,7 +83,8 @@ export type ClientMessage =
   | { type: "chat-leave" }
   | { type: "rtc-offer"; target: string; payload: SessionDescription }
   | { type: "rtc-answer"; target: string; payload: SessionDescription }
-  | { type: "rtc-ice-candidate"; target: string; payload: IceCandidate };
+  | { type: "rtc-ice-candidate"; target: string; payload: IceCandidate }
+  | { type: "e2ee-key"; target: string; payload: E2eeKeyPayload };
 
 // ---------------------------------------------------------------------------
 // Server → client
@@ -103,6 +116,7 @@ export type ServerMessage =
   | { type: "rtc-offer"; from: string; payload: SessionDescription }
   | { type: "rtc-answer"; from: string; payload: SessionDescription }
   | { type: "rtc-ice-candidate"; from: string; payload: IceCandidate }
+  | { type: "e2ee-key"; from: string; payload: E2eeKeyPayload }
   /** The peer you were chatting with disconnected. */
   | { type: "peer-left"; id: string }
   | { type: "error"; code: ServerErrorCode; message: string };

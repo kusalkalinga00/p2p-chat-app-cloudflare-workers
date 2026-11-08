@@ -407,7 +407,12 @@ export class World extends DurableObject<Env> {
 
       case "rtc-offer":
       case "rtc-answer":
-      case "rtc-ice-candidate": {
+      case "rtc-ice-candidate":
+      // The E2EE public keys travel the same gated path. The relay handles
+      // them as opaque data: it cannot forge a key it cannot decrypt the
+      // traffic of, and any substitution shows up in the safety string the
+      // two clients compare.
+      case "e2ee-key": {
         if (!meta.peerId || meta.peerId !== data.target) {
           this.sendError(ws, "not-paired", "Not in a chat with that user");
           return;
@@ -442,6 +447,13 @@ export class World extends DurableObject<Env> {
           case "rtc-ice-candidate":
             this.send(peer, {
               type: "rtc-ice-candidate",
+              from: meta.id,
+              payload: data.payload,
+            });
+            break;
+          case "e2ee-key":
+            this.send(peer, {
+              type: "e2ee-key",
               from: meta.id,
               payload: data.payload,
             });
