@@ -596,6 +596,12 @@ interface IslandConfig {
   palms?: number;
   rocks?: number;
   bushes?: number;
+  /**
+   * Radius kept free of scatter, so avatars are never planted inside a palm.
+   * The spawn ring sits at up to ~2.9 units, and a palm dropped there both
+   * hides the player and clips through the model.
+   */
+  clearRadius?: number;
 }
 
 function Island({ config }: { config: IslandConfig }) {
@@ -609,6 +615,7 @@ function Island({ config }: { config: IslandConfig }) {
     palms = 0,
     rocks = 0,
     bushes = 0,
+    clearRadius = 0,
   } = config;
 
   const geometry = useMemo(
@@ -621,11 +628,13 @@ function Island({ config }: { config: IslandConfig }) {
     const rnd = mulberry32(seed * 104729 + 7);
     const place = (minFrac: number) => {
       const angle = rnd() * Math.PI * 2;
-      const rr =
+      const rr = Math.max(
+        clearRadius,
         radius *
-        minFrac *
-        shoreFactor(geometry.shoreline, angle) *
-        (0.75 + rnd() * 0.25);
+          minFrac *
+          shoreFactor(geometry.shoreline, angle) *
+          (0.75 + rnd() * 0.25),
+      );
       return [Math.cos(angle) * rr, topY, Math.sin(angle) * rr] as [
         number,
         number,
@@ -648,7 +657,7 @@ function Island({ config }: { config: IslandConfig }) {
         scale: 0.7 + rnd() * 0.5,
       })),
     };
-  }, [geometry.shoreline, palms, radius, rocks, bushes, seed, topY]);
+  }, [clearRadius, geometry.shoreline, palms, radius, rocks, bushes, seed, topY]);
 
   return (
     <group position={[x, 0, z]}>
@@ -696,13 +705,104 @@ function Island({ config }: { config: IslandConfig }) {
 }
 
 // ---------------------------------------------------------------------------
+// Character – capsule body, head, arms, legs, ink dot eyes
+// ---------------------------------------------------------------------------
+//
+// A sphere marked presence and nothing else: no front, no feet, no read of who
+// is facing whom. This turns to face the camera every frame, so it always has
+// a face and a front, and the silhouette says "person" at this camera height.
+
+function Character({ color }: { color: string }) {
+  const ref = useRef<THREE.Group>(null);
+
+  useFrame(({ camera }) => {
+    const group = ref.current;
+    const holder = group?.parent;
+    if (!group || !holder) return;
+    // Yaw so the +Z face (the eyes) points at the camera.
+    group.rotation.y = Math.atan2(
+      camera.position.x - holder.position.x,
+      camera.position.z - holder.position.z,
+    );
+  });
+
+  return (
+    <group ref={ref}>
+      {/* Contact shadow. The shadow map is spread over ~52 units, far too
+          coarse to anchor something this small to the ground. */}
+      <mesh
+        position={[0.05, 0.012, 0.03]}
+        rotation={[-Math.PI / 2, 0, 0]}
+      >
+        <circleGeometry args={[0.34, 20]} />
+        <meshBasicMaterial
+          color={INK}
+          transparent
+          opacity={0.22}
+          depthWrite={false}
+        />
+      </mesh>
+
+      {/* legs */}
+      {[-1, 1].map((side) => (
+        <mesh
+          key={`leg-${side}`}
+          position={[side * 0.085, 0.13, 0]}
+          castShadow
+        >
+          <capsuleGeometry args={[0.062, 0.14, 3, 7]} />
+          <meshToonMaterial color={color} gradientMap={TOON_RAMP} flatShading />
+          <InkOutline />
+        </mesh>
+      ))}
+
+      {/* body */}
+      <mesh position={[0, 0.44, 0]} castShadow>
+        <capsuleGeometry args={[0.19, 0.3, 4, 9]} />
+        <meshToonMaterial color={color} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+
+      {/* arms */}
+      {[-1, 1].map((side) => (
+        <mesh
+          key={`arm-${side}`}
+          position={[side * 0.225, 0.47, 0]}
+          rotation={[0, 0, side * 0.34]}
+          castShadow
+        >
+          <capsuleGeometry args={[0.055, 0.18, 3, 7]} />
+          <meshToonMaterial color={color} gradientMap={TOON_RAMP} flatShading />
+          <InkOutline />
+        </mesh>
+      ))}
+
+      {/* head */}
+      <mesh position={[0, 0.9, 0]} castShadow>
+        <sphereGeometry args={[0.19, 14, 12]} />
+        <meshToonMaterial color={color} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+
+      {/* eyes */}
+      {[-1, 1].map((side) => (
+        <mesh key={`eye-${side}`} position={[side * 0.082, 0.945, 0.172]}>
+          <sphereGeometry args={[0.05, 10, 10]} />
+          <meshBasicMaterial color={INK} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Availability ring – flat ink ring marking who can be invited
 // ---------------------------------------------------------------------------
 
 function AvailabilityRing({ available }: { available: boolean }) {
   return (
-    <mesh position={[0, -0.32, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-      <ringGeometry args={[0.42, 0.52, 28]} />
+    <mesh position={[0, 0.015, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+      <ringGeometry args={[0.36, 0.46, 28]} />
       <meshBasicMaterial
         color={available ? TEAL : STONE}
         transparent
@@ -745,9 +845,10 @@ function Avatar({
     <group ref={groupRef} position={position}>
       <AvailabilityRing available={isLocal ? true : available} />
 
-      <mesh
-        castShadow
-        scale={hovered ? 1.12 : 1}
+      {/* Handlers sit on the group: R3F bubbles pointer events up from the
+          child meshes, so the whole character is one click target. */}
+      <group
+        scale={hovered ? 1.07 : 1}
         onClick={(e) => {
           e.stopPropagation();
           if (!isLocal && onClick) onClick();
@@ -763,10 +864,8 @@ function Avatar({
           document.body.style.cursor = "default";
         }}
       >
-        <sphereGeometry args={[0.32, 14, 14]} />
-        <meshToonMaterial color={color} gradientMap={TOON_RAMP} flatShading />
-        <InkOutline />
-      </mesh>
+        <Character color={color} />
+      </group>
 
       {/* Floating name label.
           Rendered as DOM rather than troika text: troika builds its renderer in
@@ -776,7 +875,7 @@ function Avatar({
           worker nor a font fetch, so the CSP can stay strict. */}
       <Html
         center
-        position={[0, 0.66, 0]}
+        position={[0, 1.38, 0]}
         distanceFactor={11}
         zIndexRange={[10, 0]}
         style={{ pointerEvents: "none" }}
@@ -848,6 +947,8 @@ const MAIN_ISLAND: IslandConfig = {
   topY: WATER_Y + 1.85,
   seed: 1011,
   segments: 18,
+  // The avatar ring reaches ~2.9 units from the centre; scatter starts at 3.4.
+  clearRadius: 3.4,
   palms: 6,
   rocks: 3,
   bushes: 5,
@@ -896,7 +997,8 @@ export function IslandWorld({
   myColor,
   onAvatarClick,
 }: IslandWorldProps) {
-  const surfaceY = MAIN_ISLAND.topY + 0.42;
+  // Feet on the sand: the character is modelled from y=0 up.
+  const surfaceY = MAIN_ISLAND.topY + 0.06;
 
   const remoteUsers = users.filter((u) => u.id !== myId);
   const remoteAvatarPositions = useMemo(() => {
@@ -905,7 +1007,7 @@ export function IslandWorld({
       const ring = Math.floor(index / perRing);
       const indexInRing = index % perRing;
       const angle = (indexInRing / perRing) * Math.PI * 2 + ring * 0.35;
-      const radius = 1.9 + ring * 0.9;
+      const radius = 2.2 + ring * 0.85;
 
       return [
         MAIN_ISLAND.x + Math.cos(angle) * radius,
