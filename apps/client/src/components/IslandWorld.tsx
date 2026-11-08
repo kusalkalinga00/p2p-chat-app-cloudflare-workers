@@ -1,27 +1,9 @@
-import { useLayoutEffect, useRef, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useMemo, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
-import { Html, OrbitControls } from "@react-three/drei";
+import { OrbitControls } from "@react-three/drei";
+import { useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import type { User } from "@p2p-chat/types";
-
-// ---------------------------------------------------------------------------
-// Deterministic-per-load randomness
-// ---------------------------------------------------------------------------
-// Computed once at module scope so no component render is impure.
-
-/** Per-vertex wave phase for the ocean plane (81 × 81 vertices). */
-const OCEAN_PHASES = Float32Array.from({ length: 81 * 81 }, () =>
-  Math.random() * Math.PI * 2,
-);
-
-/** Ambient particle field parameters. */
-const PARTICLES = Array.from({ length: 60 }, () => ({
-  x: (Math.random() - 0.5) * 40,
-  y: Math.random() * 8 + 1,
-  z: (Math.random() - 0.5) * 40,
-  speed: 0.3 + Math.random() * 0.5,
-  phase: Math.random() * Math.PI * 2,
-}));
 
 // ---------------------------------------------------------------------------
 // Art direction: one pen, flat fills
@@ -39,15 +21,19 @@ const CORAL = "#ff5a36";
 const MUSTARD = "#ffc145";
 const TEAL = "#1f9d8b";
 
-// Tints used for large 3D surfaces, where the full-strength colours would
-// swallow the outline drawn around them.
+// Tints for large 3D surfaces, where the full-strength colours would swallow
+// the outline drawn around them.
 const SAND = "#ffd98a";
-const SAND_LIGHT = "#ffe7b8";
+const SAND_MID = "#f2c072";
 const WATER = "#57c4b6";
 const FOLIAGE = "#17776a";
 const FOLIAGE_LIGHT = "#2aa392";
+const TRUNK = "#b98a5f";
+const COCONUT = "#c98a5f";
 const STONE = "#c2b3a4";
-const STONE_DARK = "#93867a";
+
+/** Height of the sea surface. Everything else is positioned against it. */
+const WATER_Y = -2.4;
 
 /** Three flat light bands: shadow, mid, lit. */
 const TOON_RAMP = (() => {
@@ -71,20 +57,72 @@ const TOON_RAMP = (() => {
  */
 const INK_WIDTH = 0.005;
 
+// ---------------------------------------------------------------------------
+// Seeded randomness
+// ---------------------------------------------------------------------------
+
+/** Small deterministic PRNG, so a reload produces the same archipelago. */
+function mulberry32(seed: number) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Overshoot easing: runs past 1 before settling, which is what sells a pop. */
+function easeOutBack(x: number) {
+  const c1 = 1.70158;
+  const c3 = c1 + 1;
+  return 1 + c3 * (x - 1) ** 3 + c1 * (x - 1) ** 2;
+}
+
+type Shoreline = { k: number; amp: number; phase: number }[];
+
 /**
- * Inverted-hull outline.
- *
- * drei's <Outlines> draws nothing in this stack (drei 10.7.7 / three 0.182 /
- * R3F 9.8): the hull is created, but no pixels reach the screen, and neither
- * its creased-normals path nor its thickness value is the cause. Rather than
- * keep guessing at an opaque dependency, this is the same technique written
- * out: render the geometry again with back faces only, each vertex pushed
- * along its normal by a constant number of screen pixels.
- *
- * Because the offset is applied in clip space *before* the perspective divide
- * and multiplied by w, it cancels out to a constant on-screen width — the
- * equivalent of the UI's 2px border, whatever the object's size or distance.
+ * An irregular coastline, as a sum of harmonics of the angle around the
+ * island. Because it is a pure function of the angle, the side walls, the top
+ * cap and the foam ring all agree on the silhouette without sharing indices.
  */
+function makeShoreline(seed: number, wobble = 1): Shoreline {
+  const rnd = mulberry32(seed);
+  return [
+    {
+      k: 3 + Math.floor(rnd() * 3),
+      amp: (0.10 + rnd() * 0.09) * wobble,
+      phase: rnd() * Math.PI * 2,
+    },
+    {
+      k: 6 + Math.floor(rnd() * 4),
+      amp: (0.05 + rnd() * 0.05) * wobble,
+      phase: rnd() * Math.PI * 2,
+    },
+    {
+      k: 11 + Math.floor(rnd() * 5),
+      amp: (0.02 + rnd() * 0.03) * wobble,
+      phase: rnd() * Math.PI * 2,
+    },
+  ];
+}
+
+function shoreFactor(shore: Shoreline, angle: number) {
+  let f = 1;
+  for (const h of shore) f += h.amp * Math.sin(h.k * angle + h.phase);
+  return f;
+}
+
+// ---------------------------------------------------------------------------
+// Ink outline — inverted hull
+// ---------------------------------------------------------------------------
+//
+// drei's <Outlines> draws nothing in this stack (drei 10.7.7 / three 0.182 /
+// R3F 9.8): the hull is created, but no pixels reach the screen, and neither
+// its creased-normals path nor its thickness value is the cause. This is the
+// same technique written out: render the geometry again with back faces only,
+// each vertex pushed along its normal by a constant number of screen pixels.
+
 const OUTLINE_VERTEX = /* glsl */ `
   uniform float uWidth;
   void main() {
@@ -129,23 +167,194 @@ function InkOutline({ width = INK_WIDTH }: { width?: number }) {
   return <mesh ref={ref} material={material} />;
 }
 
-interface IslandWorldProps {
-  users: User[];
-  myId: string;
-  myPosition: [number, number, number];
-  myColor: string;
-  onAvatarClick: (userId: string) => void;
+// ---------------------------------------------------------------------------
+// Island geometry — irregular silhouette, seated in the water
+// ---------------------------------------------------------------------------
+
+interface IslandGeometry {
+  body: THREE.BufferGeometry;
+  cap: THREE.BufferGeometry;
+  foam: THREE.BufferGeometry;
+  shoreline: Shoreline;
+  segments: number;
+}
+
+/**
+ * Builds one island as a ring stack.
+ *
+ * The previous version was a plain cylinder hovering just above the surface,
+ * which read as a floating rock. This profile starts at the sand rim, bulges
+ * out at the waterline and keeps going well below it, so the island is a
+ * landform standing in the sea rather than a disc in the air. The water is
+ * opaque, so the submerged part simply disappears under it.
+ */
+function buildIsland(
+  radius: number,
+  topY: number,
+  seed: number,
+  segments = 11,
+): IslandGeometry {
+  const shoreline = makeShoreline(seed);
+  const bottomY = WATER_Y - (topY - WATER_Y) - 1.6;
+
+  // Sand profile from the rim down: (height fraction, radius scaling).
+  // A wide, shallow beach rather than a vertical wall: the flank is what
+  // separates "island" from "disc", and a taller rim gives it visible height.
+  const levels = [
+    { y: topY, r: 1.0 },
+    { y: topY - 0.45, r: 1.1 },
+    { y: WATER_Y + 0.15, r: 1.24 },
+    { y: WATER_Y - 0.8, r: 1.0 },
+    { y: bottomY, r: 0.5 },
+  ];
+
+  const positions: number[] = [];
+  const indices: number[] = [];
+
+  const pushRing = (y: number, rFactor: number) => {
+    const start = positions.length / 3;
+    for (let i = 0; i < segments; i++) {
+      const angle = (i / segments) * Math.PI * 2;
+      const r = radius * rFactor * shoreFactor(shoreline, angle);
+      positions.push(Math.cos(angle) * r, y, Math.sin(angle) * r);
+    }
+    return start;
+  };
+
+  const rings = levels.map((l) => pushRing(l.y, l.r));
+
+  for (let level = 0; level < levels.length - 1; level++) {
+    const top = rings[level];
+    const bottom = rings[level + 1];
+    for (let i = 0; i < segments; i++) {
+      const j = (i + 1) % segments;
+      // Outward winding verified against the outward normal.
+      indices.push(top + i, top + j, bottom + i);
+      indices.push(top + j, bottom + j, bottom + i);
+    }
+  }
+
+  const body = new THREE.BufferGeometry();
+  body.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  body.setIndex(indices);
+  body.computeVertexNormals();
+
+  // Top surface: a shallow dome rather than a flat disc, so the island reads
+  // as a landform instead of a plateau. Centre, an inner ring, and the rim.
+  const capPositions: number[] = [0, topY + 0.14, 0];
+  const capIndices: number[] = [];
+
+  const innerStart = 1;
+  for (let i = 0; i < segments; i++) {
+    const angle = (i / segments) * Math.PI * 2;
+    const r = radius * 0.52 * shoreFactor(shoreline, angle);
+    capPositions.push(
+      Math.cos(angle) * r,
+      topY + 0.06,
+      Math.sin(angle) * r,
+    );
+  }
+
+  const rimStart = innerStart + segments;
+  for (let i = 0; i < segments; i++) {
+    const angle = (i / segments) * Math.PI * 2;
+    const r = radius * shoreFactor(shoreline, angle);
+    capPositions.push(Math.cos(angle) * r, topY, Math.sin(angle) * r);
+  }
+
+  for (let i = 0; i < segments; i++) {
+    const a = innerStart + i;
+    const b = innerStart + ((i + 1) % segments);
+    // Centre fan to the inner ring.
+    capIndices.push(0, b, a);
+    // Sloped band between the inner ring and the rim.
+    const ra = rimStart + i;
+    const rb = rimStart + ((i + 1) % segments);
+    capIndices.push(a, b, rb);
+    capIndices.push(a, rb, ra);
+  }
+  const cap = new THREE.BufferGeometry();
+  cap.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(capPositions, 3),
+  );
+  cap.setIndex(capIndices);
+  cap.computeVertexNormals();
+
+  // Foam ring where the sand meets the sea.
+  const foamPositions: number[] = [];
+  const foamIndices: number[] = [];
+  const inner: number[] = [];
+  const outer: number[] = [];
+  for (let i = 0; i < segments * 4; i++) {
+    const angle = (i / (segments * 4)) * Math.PI * 2;
+    const f = shoreline;
+    const base = 1.075 * radius * shoreFactor(f, angle);
+    inner.push(foamPositions.length / 3);
+    foamPositions.push(Math.cos(angle) * base, WATER_Y + 0.05, Math.sin(angle) * base);
+    outer.push(foamPositions.length / 3);
+    foamPositions.push(
+      Math.cos(angle) * base * 1.16,
+      WATER_Y + 0.05,
+      Math.sin(angle) * base * 1.16,
+    );
+  }
+  for (let i = 0; i < segments * 4; i++) {
+    const n = (i + 1) % (segments * 4);
+    foamIndices.push(inner[i], outer[i], inner[n]);
+    foamIndices.push(inner[n], outer[i], outer[n]);
+  }
+  const foam = new THREE.BufferGeometry();
+  foam.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(foamPositions, 3),
+  );
+  foam.setIndex(foamIndices);
+  foam.computeVertexNormals();
+
+  return { body, cap, foam, shoreline, segments };
 }
 
 // ---------------------------------------------------------------------------
-// Ocean – animated low-poly water plane
+// Ocean – displaced low-poly water with drifting foam crests
 // ---------------------------------------------------------------------------
 
-/** A large low-poly plane with gentle vertex-based wave animation. */
+/**
+ * Uniform holders shared with the patched water shader.
+ *
+ * Module scope rather than useMemo: the React Compiler lint forbids mutating a
+ * memoised value after render, and the shader needs the same object identity
+ * for the lifetime of the material.
+ */
+const WATER_UNIFORMS = {
+  uTime: { value: 0 },
+  uFoam: { value: new THREE.Color(CREAM) },
+};
+
 function Ocean() {
   const meshRef = useRef<THREE.Mesh>(null);
 
+  // Flat shading over a perfectly regular lattice draws a visible grid. The
+  // vertices are jittered once so the facets are irregular, like hand-cut
+  // tiles; the border ring stays put so the plane still covers the view.
+  const geometry = useMemo(() => {
+    const geo = new THREE.PlaneGeometry(150, 150, 52, 52);
+    const pos = geo.attributes.position;
+    const rnd = mulberry32(4242);
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      if (Math.abs(x) < 70 && Math.abs(y) < 70) {
+        pos.setX(i, x + (rnd() - 0.5) * 2.6);
+        pos.setY(i, y + (rnd() - 0.5) * 2.6);
+      }
+    }
+    geo.computeVertexNormals();
+    return geo;
+  }, []);
+
   useFrame(({ clock }) => {
+    WATER_UNIFORMS.uTime.value = clock.elapsedTime;
     if (!meshRef.current) return;
     const geo = meshRef.current.geometry as THREE.PlaneGeometry;
     const pos = geo.attributes.position;
@@ -154,12 +363,10 @@ function Ocean() {
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i);
       const y = pos.getY(i);
-      // Small wave displacement on the Z axis (plane is rotated -90° on X)
+      // The plane is rotated -90° on X, so local Z is world height.
       pos.setZ(
         i,
-        Math.sin(x * 0.3 + t * 0.6 + OCEAN_PHASES[i % OCEAN_PHASES.length]) *
-          0.15 +
-          Math.cos(y * 0.25 + t * 0.4) * 0.1,
+        Math.sin(x * 0.3 + t * 0.6) * 0.24 + Math.cos(y * 0.25 + t * 0.4) * 0.16,
       );
     }
     pos.needsUpdate = true;
@@ -170,74 +377,180 @@ function Ocean() {
     <mesh
       ref={meshRef}
       rotation={[-Math.PI / 2, 0, 0]}
-      position={[0, -2.4, 0]}
+      position={[0, WATER_Y, 0]}
       receiveShadow
     >
-      <planeGeometry args={[120, 120, 80, 80]} />
+      {/* Fewer, larger facets: at this camera the 96² version read as a flat
+          sheet, and visible facets are how a toon sea shows its waves. */}
+      <primitive object={geometry} attach="geometry" />
       {/* Opaque, unlike the previous 85%-transparent version: a full-screen
-          transparent surface forces depth sorting every frame, and flat water
-          is the point. The toon ramp turns the wave normals into facets. */}
+          transparent surface forces depth sorting every frame, and the flat
+          fill is the point. */}
       <meshToonMaterial
         color={WATER}
         gradientMap={TOON_RAMP}
         flatShading
         side={THREE.DoubleSide}
+        onBeforeCompile={(shader) => {
+          // Foam crests, drawn where the surface is actually high. The vertex
+          // displacement above uses the same two waves, so the lines ride the
+          // real peaks instead of drifting across the surface at random.
+          shader.uniforms.uTime = WATER_UNIFORMS.uTime;
+          shader.uniforms.uFoam = WATER_UNIFORMS.uFoam;
+
+          shader.vertexShader = `varying vec3 vWorldPos;\n${shader.vertexShader}`.replace(
+            "#include <begin_vertex>",
+            `#include <begin_vertex>
+             vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;`,
+          );
+
+          shader.fragmentShader = `uniform float uTime;\nuniform vec3 uFoam;\nvarying vec3 vWorldPos;\n${shader.fragmentShader}`.replace(
+            "#include <dithering_fragment>",
+            `#include <dithering_fragment>
+             // Waves drawn as thin lines, the way a hand would ink them:
+             // a line appears where a wave train crosses zero, so the width is
+             // set by the smoothstep rather than by how much of the surface
+             // happens to be crest. Thresholding the wave *height* instead
+             // produced broad white blobs.
+             vec2 p = vWorldPos.xz;
+             // Warp the domain before drawing the crests. Without this the
+             // waves are two straight sine families crossing at a constant
+             // spacing, which reads as a wireframe grid rather than as swell.
+             vec2 warp = vec2(
+               sin(p.y * 0.13 + uTime * 0.25) + 0.5 * sin(p.y * 0.31 - uTime * 0.40),
+               cos(p.x * 0.11 - uTime * 0.22) + 0.5 * cos(p.x * 0.27 + uTime * 0.35)
+             );
+             p += warp * 3.1;
+
+             // Crests as contours of a slow wave field: the lines close and
+             // bend instead of running straight to the horizon.
+             float field = sin(p.x * 0.52 + uTime * 0.70) * 0.5
+                         + sin(p.y * 0.44 - uTime * 0.52) * 0.5;
+             float crest = 1.0 - smoothstep(0.0, 0.30, abs(field - 0.42));
+
+             // Break the crests into dashes so they read as foam, not as lines
+             // drawn with a ruler.
+             float dash = smoothstep(0.05, 0.55, sin(p.x * 0.9 + p.y * 0.7 + uTime * 1.1));
+             crest *= mix(0.35, 1.0, dash);
+
+             // Fade with distance so the pattern cannot alias into noise.
+             float fade = 1.0 - smoothstep(30.0, 68.0, length(vWorldPos.xz));
+             gl_FragColor.rgb = mix(gl_FragColor.rgb, uFoam, crest * fade * 0.85);`,
+          );
+        }}
       />
     </mesh>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Low-poly tree decoration
+// Coconut palm
 // ---------------------------------------------------------------------------
 
-function LowPolyTree({
+/** One frond, grown from its base so it can be rotated about the crown. */
+const FROND_GEOMETRY = (() => {
+  const g = new THREE.ConeGeometry(0.19, 1.05, 4, 1, false);
+  g.translate(0, 0.525, 0);
+  return g;
+})();
+
+function CoconutPalm({
   position,
   scale = 1,
+  seed = 1,
 }: {
   position: [number, number, number];
   scale?: number;
+  seed?: number;
 }) {
+  const { trunk, crown, fronds, coconuts } = useMemo(() => {
+    const rnd = mulberry32(seed * 7919 + 13);
+    const height = 1.75 + rnd() * 1.0;
+    const lean = (rnd() - 0.5) * 0.9;
+
+    // A curved trunk: one tube along a spline reads far more like a palm than
+    // a stack of cylinders, and stays a single outlined mesh.
+    const curve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(lean * 0.12, height * 0.4, 0),
+      new THREE.Vector3(lean * 0.38, height * 0.78, 0),
+      new THREE.Vector3(lean * 0.62, height, 0),
+    ]);
+    // Thick enough to read at this camera distance; at 0.062 the trunks
+    // vanished behind their own canopies.
+    const trunkGeometry = new THREE.TubeGeometry(curve, 8, 0.105, 6, false);
+    const crownAt = curve.getPoint(1);
+
+    const count = 6 + Math.floor(rnd() * 3);
+    const fronds = Array.from({ length: count }, (_, i) => ({
+      yaw: (i / count) * Math.PI * 2 + rnd() * 0.5,
+      tilt: 1.95 + rnd() * 0.5,
+      scale: 0.85 + rnd() * 0.3,
+    }));
+
+    const coconuts = Array.from({ length: 3 }, (_, i) => {
+      const a = (i / 3) * Math.PI * 2 + rnd() * 0.6;
+      return {
+        x: Math.cos(a) * 0.24,
+        y: -0.3 - rnd() * 0.08,
+        z: Math.sin(a) * 0.24,
+      };
+    });
+
+    return { trunk: trunkGeometry, crown: crownAt, fronds, coconuts };
+  }, [seed]);
+
   return (
     <group position={position} scale={scale}>
-      {/* Trunk */}
-      <mesh position={[0, 0.3, 0]} castShadow>
-        <cylinderGeometry args={[0.08, 0.12, 0.6, 5]} />
+      <mesh geometry={trunk} castShadow>
         <meshToonMaterial
-          color={STONE_DARK}
+          color={TRUNK}
           gradientMap={TOON_RAMP}
           flatShading
         />
         <InkOutline />
       </mesh>
-      {/* Canopy – stacked low-poly cones */}
-      <mesh position={[0, 0.85, 0]} castShadow>
-        <coneGeometry args={[0.45, 0.7, 6]} />
-        <meshToonMaterial
-          color={FOLIAGE}
-          gradientMap={TOON_RAMP}
-          flatShading
-        />
-        <InkOutline />
-      </mesh>
-      <mesh position={[0, 1.2, 0]} castShadow>
-        <coneGeometry args={[0.32, 0.55, 6]} />
-        <meshToonMaterial
-          color={FOLIAGE_LIGHT}
-          gradientMap={TOON_RAMP}
-          flatShading
-        />
-        <InkOutline />
-      </mesh>
+
+      <group position={[crown.x, crown.y, crown.z]}>
+        {fronds.map((frond, i) => (
+          <group key={`frond-${i}`} rotation={[0, frond.yaw, 0]}>
+            <mesh
+              geometry={FROND_GEOMETRY}
+              rotation={[frond.tilt, 0, 0]}
+              scale={[1, frond.scale, 0.42]}
+              castShadow
+            >
+              <meshToonMaterial
+                color={i % 2 === 0 ? FOLIAGE : FOLIAGE_LIGHT}
+                gradientMap={TOON_RAMP}
+                flatShading
+              />
+              <InkOutline />
+            </mesh>
+          </group>
+        ))}
+
+        {coconuts.map((c, i) => (
+          <mesh key={`nut-${i}`} position={[c.x, c.y, c.z]} castShadow>
+            <sphereGeometry args={[0.145, 7, 6]} />
+            <meshToonMaterial
+              color={COCONUT}
+              gradientMap={TOON_RAMP}
+              flatShading
+            />
+            <InkOutline />
+          </mesh>
+        ))}
+      </group>
     </group>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Low-poly rock decoration
+// Scatter: rocks and low bushes
 // ---------------------------------------------------------------------------
 
-function LowPolyRock({
+function Rock({
   position,
   scale = 1,
   color = STONE,
@@ -248,104 +561,369 @@ function LowPolyRock({
 }) {
   return (
     <mesh position={position} scale={scale} castShadow>
-      <dodecahedronGeometry args={[0.25, 0]} />
+      <dodecahedronGeometry args={[0.22, 0]} />
       <meshToonMaterial color={color} gradientMap={TOON_RAMP} flatShading />
       <InkOutline />
     </mesh>
   );
 }
 
+function Bush({
+  position,
+  scale = 1,
+}: {
+  position: [number, number, number];
+  scale?: number;
+}) {
+  return (
+    <mesh
+      position={position}
+      scale={[scale, scale * 0.7, scale]}
+      castShadow
+    >
+      <icosahedronGeometry args={[0.22, 0]} />
+      <meshToonMaterial
+        color={FOLIAGE}
+        gradientMap={TOON_RAMP}
+        flatShading
+      />
+      <InkOutline />
+    </mesh>
+  );
+}
+
 // ---------------------------------------------------------------------------
-// Island – low-poly floating island with optional decorations
+// Island – one generated landform plus its scatter
 // ---------------------------------------------------------------------------
 
 interface IslandConfig {
-  position: [number, number, number];
-  color: string;
-  radiusTop?: number;
-  radiusBottom?: number;
-  height?: number;
+  x: number;
+  z: number;
+  radius: number;
+  topY: number;
+  seed: number;
   segments?: number;
-  /** Speed multiplier for the bobbing animation */
-  bobSpeed?: number;
-  trees?: [number, number, number][];
-  rocks?: { pos: [number, number, number]; scale?: number; color?: string }[];
+  palms?: number;
+  rocks?: number;
+  bushes?: number;
+  /**
+   * Radius kept free of scatter, so avatars are never planted inside a palm.
+   * The spawn ring sits at up to ~2.9 units, and a palm dropped there both
+   * hides the player and clips through the model.
+   */
+  clearRadius?: number;
+  /** Local x/z for a lighthouse, and a radius the scatter avoids around it. */
+  lighthouseAt?: [number, number];
 }
 
 function Island({ config }: { config: IslandConfig }) {
   const {
-    position,
-    color,
-    radiusTop = 3,
-    radiusBottom = 2.5,
-    height = 1,
-    segments = 7,
-    bobSpeed = 0.5,
-    trees = [],
-    rocks = [],
+    x,
+    z,
+    radius,
+    topY,
+    seed,
+    segments = 11,
+    palms = 0,
+    rocks = 0,
+    bushes = 0,
+    clearRadius = 0,
+    lighthouseAt,
   } = config;
 
-  const groupRef = useRef<THREE.Group>(null);
+  const geometry = useMemo(
+    () => buildIsland(radius, topY, seed, segments),
+    [radius, topY, seed, segments],
+  );
 
-  // Independent gentle bob
+  // Scatter, kept clear of the avatar ring in the middle of the main island.
+  const scatter = useMemo(() => {
+    const rnd = mulberry32(seed * 104729 + 7);
+    const place = (minFrac: number) => {
+      let x = 0;
+      let z = 0;
+      // Resample rather than nudge: a palm dropped on the lighthouse looks
+      // worse than one fewer palm.
+      for (let attempt = 0; attempt < 12; attempt++) {
+        const angle = rnd() * Math.PI * 2;
+        const rr = Math.max(
+          clearRadius,
+          radius *
+            minFrac *
+            shoreFactor(geometry.shoreline, angle) *
+            (0.75 + rnd() * 0.25),
+        );
+        x = Math.cos(angle) * rr;
+        z = Math.sin(angle) * rr;
+        if (
+          !lighthouseAt ||
+          Math.hypot(x - lighthouseAt[0], z - lighthouseAt[1]) > 2.8
+        ) {
+          break;
+        }
+      }
+      return [x, topY, z] as [number, number, number];
+    };
+
+    return {
+      palms: Array.from({ length: palms }, (_, i) => ({
+        position: place(0.42),
+        scale: 1.0 + rnd() * 0.45,
+        seed: seed + i * 31,
+      })),
+      rocks: Array.from({ length: rocks }, () => ({
+        position: place(0.55),
+        scale: 0.7 + rnd() * 0.8,
+      })),
+      bushes: Array.from({ length: bushes }, () => ({
+        position: place(0.6),
+        scale: 0.7 + rnd() * 0.5,
+      })),
+    };
+  }, [
+    clearRadius,
+    geometry.shoreline,
+    lighthouseAt,
+    palms,
+    radius,
+    rocks,
+    bushes,
+    seed,
+    topY,
+  ]);
+
+  return (
+    <group position={[x, 0, z]}>
+      <mesh geometry={geometry.body} castShadow receiveShadow>
+        <meshToonMaterial color={SAND_MID} gradientMap={TOON_RAMP} />
+        <InkOutline />
+      </mesh>
+
+      <mesh geometry={geometry.cap} castShadow receiveShadow>
+        <meshToonMaterial color={SAND} gradientMap={TOON_RAMP} />
+        <InkOutline />
+      </mesh>
+
+      {/* Waterline foam, so the sand visibly meets the sea. Kept soft: at full
+          cream opacity the ring reads as a sticker outline and the island
+          looks cut out of the water. */}
+      <mesh geometry={geometry.foam}>
+        <meshBasicMaterial
+          color="#eafaf4"
+          transparent
+          opacity={0.72}
+          side={THREE.DoubleSide}
+          depthWrite={false}
+        />
+      </mesh>
+
+      {scatter.palms.map((palm, i) => (
+        <CoconutPalm
+          key={`palm-${i}`}
+          position={palm.position}
+          scale={palm.scale}
+          seed={palm.seed}
+        />
+      ))}
+
+      {scatter.rocks.map((rock, i) => (
+        <Rock key={`rock-${i}`} position={rock.position} scale={rock.scale} />
+      ))}
+
+      {scatter.bushes.map((bush, i) => (
+        <Bush key={`bush-${i}`} position={bush.position} scale={bush.scale} />
+      ))}
+
+      {lighthouseAt && (
+        <Lighthouse position={[lighthouseAt[0], topY, lighthouseAt[1]]} />
+      )}
+    </group>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Buoy – a channel marker bobbing in the swell
+// ---------------------------------------------------------------------------
+
+function Buoy({
+  position,
+  seed,
+}: {
+  position: [number, number, number];
+  seed: number;
+}) {
+  const ref = useRef<THREE.Group>(null);
+  const phase = useMemo(() => (seed % 100) / 15, [seed]);
+
   useFrame(({ clock }) => {
-    if (!groupRef.current) return;
-    groupRef.current.position.y =
-      position[1] + Math.sin(clock.elapsedTime * bobSpeed) * 0.2;
+    const group = ref.current;
+    if (!group) return;
+    const t = clock.elapsedTime;
+    // Bob on the same period as the swell and lean with it, so the markers
+    // look like they are riding the water rather than hovering over it.
+    group.position.y = WATER_Y + 0.16 + Math.sin(t * 1.15 + phase) * 0.11;
+    group.rotation.z = Math.sin(t * 0.95 + phase) * 0.09;
+    group.rotation.x = Math.cos(t * 1.05 + phase * 0.7) * 0.07;
+  });
+
+  // Tall and slim with a pointed finial: a round cap on a short body read as a
+  // tiny character's head from the default camera.
+  return (
+    <group ref={ref} position={position} scale={1.25}>
+      <mesh position={[0, 0.44, 0]} castShadow>
+        <coneGeometry args={[0.15, 0.86, 9]} />
+        <meshToonMaterial color={CORAL} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+      <mesh position={[0, 0.5, 0]} castShadow>
+        <cylinderGeometry args={[0.115, 0.13, 0.1, 9]} />
+        <meshToonMaterial color={CREAM} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+      <mesh position={[0, 0.95, 0]} castShadow>
+        <coneGeometry args={[0.06, 0.16, 8]} />
+        <meshToonMaterial
+          color={MUSTARD}
+          gradientMap={TOON_RAMP}
+          flatShading
+        />
+        <InkOutline />
+      </mesh>
+    </group>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Lighthouse – the one landmark on the horizon
+// ---------------------------------------------------------------------------
+
+function Lighthouse({ position }: { position: [number, number, number] }) {
+  return (
+    // Scaled up from the natural prop scale: at one character's height it read
+    // as scenery rather than as the landmark the island is built around.
+    <group position={position} scale={1.85}>
+      {/* tower, in bands so it reads from a distance */}
+      <mesh position={[0, 0.75, 0]} castShadow>
+        <cylinderGeometry args={[0.26, 0.34, 1.5, 10]} />
+        <meshToonMaterial color={CREAM} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+      <mesh position={[0, 0.62, 0]} castShadow>
+        <cylinderGeometry args={[0.3, 0.31, 0.26, 10]} />
+        <meshToonMaterial color={CORAL} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+      {/* gallery and lamp */}
+      <mesh position={[0, 1.56, 0]} castShadow>
+        <cylinderGeometry args={[0.34, 0.3, 0.1, 10]} />
+        <meshToonMaterial color={INK} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+      <mesh position={[0, 1.74, 0]} castShadow>
+        <cylinderGeometry args={[0.22, 0.22, 0.28, 10]} />
+        <meshToonMaterial
+          color={MUSTARD}
+          gradientMap={TOON_RAMP}
+          flatShading
+        />
+        <InkOutline />
+      </mesh>
+      {/* roof */}
+      <mesh position={[0, 1.98, 0]} castShadow>
+        <coneGeometry args={[0.32, 0.3, 10]} />
+        <meshToonMaterial color={CORAL} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+    </group>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Character – capsule body, head, arms, legs, ink dot eyes
+// ---------------------------------------------------------------------------
+//
+// A sphere marked presence and nothing else: no front, no feet, no read of who
+// is facing whom. This turns to face the camera every frame, so it always has
+// a face and a front, and the silhouette says "person" at this camera height.
+
+function Character({ color }: { color: string }) {
+  const ref = useRef<THREE.Group>(null);
+
+  useFrame(({ camera }) => {
+    const group = ref.current;
+    const holder = group?.parent;
+    if (!group || !holder) return;
+    // Yaw so the +Z face (the eyes) points at the camera.
+    group.rotation.y = Math.atan2(
+      camera.position.x - holder.position.x,
+      camera.position.z - holder.position.z,
+    );
   });
 
   return (
-    <group ref={groupRef} position={position}>
-      {/* Main island body */}
-      <mesh castShadow receiveShadow>
-        <cylinderGeometry args={[radiusTop, radiusBottom, height, segments]} />
+    <group ref={ref}>
+      {/* Contact shadow. The shadow map is spread over ~52 units, far too
+          coarse to anchor something this small to the ground. */}
+      <mesh
+        position={[0.05, 0.012, 0.03]}
+        rotation={[-Math.PI / 2, 0, 0]}
+      >
+        <circleGeometry args={[0.34, 20]} />
+        <meshBasicMaterial
+          color={INK}
+          transparent
+          opacity={0.22}
+          depthWrite={false}
+        />
+      </mesh>
+
+      {/* legs */}
+      {[-1, 1].map((side) => (
+        <mesh
+          key={`leg-${side}`}
+          position={[side * 0.085, 0.13, 0]}
+          castShadow
+        >
+          <capsuleGeometry args={[0.062, 0.14, 3, 7]} />
+          <meshToonMaterial color={color} gradientMap={TOON_RAMP} flatShading />
+          <InkOutline />
+        </mesh>
+      ))}
+
+      {/* body */}
+      <mesh position={[0, 0.44, 0]} castShadow>
+        <capsuleGeometry args={[0.19, 0.3, 4, 9]} />
         <meshToonMaterial color={color} gradientMap={TOON_RAMP} flatShading />
         <InkOutline />
       </mesh>
 
-      {/* Grass/top layer — slightly wider disc on top */}
-      <mesh position={[0, height / 2 + 0.02, 0]} receiveShadow>
-        <cylinderGeometry
-          args={[radiusTop * 1.02, radiusTop, 0.08, segments]}
-        />
-        <meshToonMaterial
-          color={SAND_LIGHT}
-          gradientMap={TOON_RAMP}
-          flatShading
-        />
-        <InkOutline />
-      </mesh>
-
-      {/* Bottom underside — darker layer for depth */}
-      <mesh position={[0, -height / 2 - 0.15, 0]}>
-        <cylinderGeometry
-          args={[radiusBottom, radiusBottom * 0.6, 0.3, segments]}
-        />
-        <meshToonMaterial
-          color={STONE_DARK}
-          gradientMap={TOON_RAMP}
-          flatShading
-        />
-        <InkOutline />
-      </mesh>
-
-      {/* Decorative trees */}
-      {trees.map((treePos, i) => (
-        <LowPolyTree
-          key={`tree-${i}`}
-          position={[treePos[0], height / 2 + 0.04, treePos[2]]}
-          scale={treePos[1]}
-        />
+      {/* arms */}
+      {[-1, 1].map((side) => (
+        <mesh
+          key={`arm-${side}`}
+          position={[side * 0.225, 0.47, 0]}
+          rotation={[0, 0, side * 0.34]}
+          castShadow
+        >
+          <capsuleGeometry args={[0.055, 0.18, 3, 7]} />
+          <meshToonMaterial color={color} gradientMap={TOON_RAMP} flatShading />
+          <InkOutline />
+        </mesh>
       ))}
 
-      {/* Decorative rocks */}
-      {rocks.map((rock, i) => (
-        <LowPolyRock
-          key={`rock-${i}`}
-          position={[rock.pos[0], height / 2 + 0.15, rock.pos[2]]}
-          scale={rock.scale}
-          color={rock.color}
-        />
+      {/* head */}
+      <mesh position={[0, 0.9, 0]} castShadow>
+        <sphereGeometry args={[0.19, 14, 12]} />
+        <meshToonMaterial color={color} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+
+      {/* eyes */}
+      {[-1, 1].map((side) => (
+        <mesh key={`eye-${side}`} position={[side * 0.082, 0.945, 0.172]}>
+          <sphereGeometry args={[0.05, 10, 10]} />
+          <meshBasicMaterial color={INK} />
+        </mesh>
       ))}
     </group>
   );
@@ -357,8 +935,8 @@ function Island({ config }: { config: IslandConfig }) {
 
 function AvailabilityRing({ available }: { available: boolean }) {
   return (
-    <mesh position={[0, -0.32, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-      <ringGeometry args={[0.42, 0.52, 28]} />
+    <mesh position={[0, 0.015, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+      <ringGeometry args={[0.36, 0.46, 28]} />
       <meshBasicMaterial
         color={available ? TEAL : STONE}
         transparent
@@ -370,45 +948,79 @@ function AvailabilityRing({ available }: { available: boolean }) {
 }
 
 // ---------------------------------------------------------------------------
-// Avatar – user sphere with label, idle bounce, and click handling
+// Avatar
 // ---------------------------------------------------------------------------
 
 function Avatar({
   position,
   color,
-  id,
   isLocal = false,
   available = true,
   onClick,
 }: {
   position: [number, number, number];
   color: string;
-  id: string;
   isLocal?: boolean;
   available?: boolean;
   onClick?: () => void;
 }) {
   const groupRef = useRef<THREE.Group>(null);
+  const bodyRef = useRef<THREE.Group>(null);
   const [hovered, setHovered] = useState(false);
 
-  // Idle bounce, plus a lift while hovered so the click target reads as
-  // pressable without an emissive glow.
+  // Clock stamp of the last frame, so pointer handlers can schedule an
+  // animation against the same time source the frame loop uses.
+  const nowRef = useRef(0);
+  const bornAt = useRef<number | null>(null);
+  const pressedAt = useRef<number | null>(null);
+
   useFrame(({ clock }) => {
-    if (!groupRef.current) return;
-    const bounce = Math.sin(clock.elapsedTime * 2 + position[0]) * 0.1;
-    groupRef.current.position.y = position[1] + bounce + (hovered ? 0.12 : 0);
+    const outer = groupRef.current;
+    const body = bodyRef.current;
+    if (!outer || !body) return;
+
+    const t = clock.elapsedTime;
+    nowRef.current = t;
+    if (bornAt.current === null) bornAt.current = t;
+
+    const bounce = Math.sin(t * 2 + position[0]) * 0.08;
+    outer.position.y = position[1] + bounce + (hovered ? 0.12 : 0);
+
+    // Arriving pops: scale runs slightly past 1 and settles.
+    const age = t - bornAt.current;
+    const pop = age < 0.45 ? easeOutBack(age / 0.45) : 1;
+    const hover = hovered ? 1.07 : 1;
+
+    // Clicking squashes: wider and shorter for a moment, like a sticker
+    // being pressed into the page.
+    let sx = 1;
+    let sy = 1;
+    if (pressedAt.current !== null) {
+      const progress = (t - pressedAt.current) / 0.2;
+      if (progress >= 1) {
+        pressedAt.current = null;
+      } else {
+        const k = Math.sin(Math.PI * progress);
+        sy = 1 - 0.16 * k;
+        sx = 1 + 0.14 * k;
+      }
+    }
+
+    const base = pop * hover;
+    body.scale.set(base * sx, base * sy, base * sx);
   });
 
   return (
     <group ref={groupRef} position={position}>
       <AvailabilityRing available={isLocal ? true : available} />
 
-      {/* Avatar sphere */}
-      <mesh
-        castShadow
-        scale={hovered ? 1.12 : 1}
+      {/* Handlers sit on the group: R3F bubbles pointer events up from the
+          child meshes, so the whole character is one click target. */}
+      <group
+        ref={bodyRef}
         onClick={(e) => {
           e.stopPropagation();
+          pressedAt.current = nowRef.current;
           if (!isLocal && onClick) onClick();
         }}
         onPointerOver={(e) => {
@@ -422,56 +1034,147 @@ function Avatar({
           document.body.style.cursor = "default";
         }}
       >
-        <sphereGeometry args={[0.35, 14, 14]} />
-        <meshToonMaterial color={color} gradientMap={TOON_RAMP} flatShading />
-        <InkOutline />
-      </mesh>
+        <Character color={color} />
+      </group>
 
-      {/* Floating name label.
-          Rendered as DOM rather than troika text: troika builds its renderer in
-          a blob-URL worker, and under a Content-Security-Policy that worker
-          fails silently, which leaves the font promise pending and suspends this
-          component — taking the entire scene with it. DOM labels need neither a
-          worker nor a font fetch, so the CSP can stay strict. */}
-      <Html
-        center
-        position={[0, 0.68, 0]}
-        distanceFactor={11}
-        zIndexRange={[10, 0]}
-        style={{ pointerEvents: "none" }}
-      >
-        <span
-          className={`whitespace-nowrap rounded-full border-2 border-ink px-3 py-1 text-[12px] font-extrabold tracking-tight shadow-[2px_2px_0_var(--color-ink)] ${
-            isLocal ? "bg-mustard text-ink" : "bg-cream text-ink"
-          }`}
-        >
-          {isLocal ? "You" : id.slice(0, 6)}
-        </span>
-      </Html>
+      {/* The name label is drawn by <WorldLabels> in a DOM overlay above the
+          canvas. drei's <Html> was used here and proved unreliable in this
+          stack: instances silently vanished from the DOM, taking labels with
+          them, and React logged "attempted to synchronously unmount a root
+          while React was already rendering" on every mount. */}
     </group>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Ambient floating particles
+// Name labels — a DOM overlay projected from the camera
+// ---------------------------------------------------------------------------
+//
+// drei's <Html> created and tore down a React root per label, which in this
+// stack left labels missing from the DOM entirely. These are plain elements in
+// an overlay above the canvas, positioned by projecting a world point through
+// the camera each frame — no portal, no extra root, nothing to unmount.
+
+const LABEL_BASE =
+  "absolute left-0 top-0 whitespace-nowrap rounded-full border-2 border-ink px-3 py-1 text-[12px] font-extrabold tracking-tight shadow-[2px_2px_0_var(--color-ink)]";
+
+interface LabelItem {
+  id: string;
+  label: string;
+  position: [number, number, number];
+  isLocal: boolean;
+}
+
+function WorldLabels({
+  items,
+  overlay,
+}: {
+  items: LabelItem[];
+  overlay: { current: HTMLDivElement | null };
+}) {
+  const { camera } = useThree();
+  const nodes = useRef(new Map<string, HTMLSpanElement>());
+  const projected = useMemo(() => new THREE.Vector3(), []);
+
+  // Create, update and remove the elements alongside the item list.
+  useEffect(() => {
+    const container = overlay.current;
+    if (!container) return;
+
+    const seen = new Set<string>();
+    for (const item of items) {
+      seen.add(item.id);
+      const className = `${LABEL_BASE} ${item.isLocal ? "bg-mustard text-ink" : "bg-cream text-ink"}`;
+      let el = nodes.current.get(item.id);
+      if (!el) {
+        el = document.createElement("span");
+        container.appendChild(el);
+        nodes.current.set(item.id, el);
+      }
+      el.className = className;
+      el.textContent = item.label;
+    }
+
+    for (const [id, el] of nodes.current) {
+      if (!seen.has(id)) {
+        el.remove();
+        nodes.current.delete(id);
+      }
+    }
+  }, [items, overlay]);
+
+  useFrame(() => {
+    const container = overlay.current;
+    if (!container) return;
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+
+    for (const item of items) {
+      const el = nodes.current.get(item.id);
+      if (!el) continue;
+
+      projected
+        .set(item.position[0], item.position[1] + 1.45, item.position[2])
+        .project(camera);
+
+      // Behind the camera, or far outside the viewport: hide rather than draw
+      // a mirrored label at the wrong place.
+      if (projected.z > 1) {
+        el.style.display = "none";
+        continue;
+      }
+
+      el.style.display = "";
+      const x = (projected.x * 0.5 + 0.5) * width;
+      const y = (-projected.y * 0.5 + 0.5) * height;
+
+      // Shrink slightly with distance, like a diegetic tag would.
+      const distance = camera.position.distanceTo(
+        projected.set(item.position[0], item.position[1], item.position[2]),
+      );
+      const scale = THREE.MathUtils.clamp(16 / distance, 0.62, 1.15);
+
+      // Position with left/top and centre with a single transform. Putting the
+      // positional translate in the same transform list let the per-label
+      // scale multiply the -50% centring, so labels at different distances were
+      // offset from their characters by different amounts.
+      el.style.left = `${x.toFixed(1)}px`;
+      el.style.top = `${y.toFixed(1)}px`;
+      el.style.transformOrigin = "50% 100%";
+      el.style.transform = `translate(-50%, -100%) scale(${scale.toFixed(2)})`;
+    }
+  });
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Sea spray
 // ---------------------------------------------------------------------------
 
-function Particles({ count = 60 }: { count?: number }) {
+const SPRAY = Array.from({ length: 40 }, () => ({
+  x: (Math.random() - 0.5) * 44,
+  y: Math.random() * 4 + 0.4,
+  z: (Math.random() - 0.5) * 44,
+  speed: 0.3 + Math.random() * 0.5,
+  phase: Math.random() * Math.PI * 2,
+}));
+
+function Spray({ count = 40 }: { count?: number }) {
   const ref = useRef<THREE.InstancedMesh>(null);
   const dummy = useMemo(() => new THREE.Object3D(), []);
-
-  const data = useMemo(() => PARTICLES.slice(0, count), [count]);
+  const data = useMemo(() => SPRAY.slice(0, count), [count]);
 
   useFrame(({ clock }) => {
     if (!ref.current) return;
     const t = clock.elapsedTime;
     data.forEach((p, i) => {
       dummy.position.set(
-        p.x + Math.sin(t * p.speed + p.phase) * 0.5,
-        p.y + Math.sin(t * p.speed * 1.3 + p.phase) * 0.8,
-        p.z + Math.cos(t * p.speed + p.phase) * 0.5,
+        p.x + Math.sin(t * p.speed + p.phase) * 0.4,
+        p.y + Math.sin(t * p.speed * 1.3 + p.phase) * 0.5,
+        p.z + Math.cos(t * p.speed + p.phase) * 0.4,
       );
-      dummy.scale.setScalar(0.04 + Math.sin(t * 2 + p.phase) * 0.02);
+      dummy.scale.setScalar(0.03 + Math.sin(t * 2 + p.phase) * 0.015);
       dummy.updateMatrix();
       ref.current!.setMatrixAt(i, dummy.matrix);
     });
@@ -481,191 +1184,87 @@ function Particles({ count = 60 }: { count?: number }) {
   return (
     <instancedMesh ref={ref} args={[undefined, undefined, count]}>
       <sphereGeometry args={[1, 6, 6]} />
-      <meshBasicMaterial color={CREAM} transparent opacity={0.75} />
+      <meshBasicMaterial color={CREAM} transparent opacity={0.7} />
     </instancedMesh>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Island presets – positions, decorations, and visual variety
+// The archipelago
 // ---------------------------------------------------------------------------
 //
-// Colours are drawn only from the UI palette (plus two warm-grey neutrals).
-// The previous six-pastel scheme shared nothing with the chrome: nothing else
-// in the product was purple, amber or sky blue.
+// Generated rather than hand-listed: one large island with a seeded ring of
+// smaller ones around it, so no two reloads lay out identical shapes.
 
-const ISLANDS: IslandConfig[] = [
-  {
-    // Center island – largest, sand
-    position: [0, -1.5, 0],
-    color: SAND,
-    radiusTop: 6.2,
-    radiusBottom: 4.8,
-    height: 1.6,
-    segments: 8,
-    bobSpeed: 0.35,
-    trees: [
-      [-1.5, 1, -0.8],
-      [1.2, 0.8, 1],
-      [0.3, 1.2, -1.5],
-    ],
-    rocks: [
-      { pos: [2, 0, -1.2], scale: 1 },
-      { pos: [-2.2, 0, 0.8], scale: 0.7, color: CORAL },
-    ],
-  },
-  {
-    // Coral island – north-east
-    position: [9, -1, -6],
-    color: CORAL,
-    radiusTop: 1.8,
-    radiusBottom: 1.4,
-    height: 0.65,
-    segments: 6,
-    bobSpeed: 0.45,
-    trees: [
-      [0.6, 0.9, -0.4],
-      [-0.8, 0.7, 0.5],
-    ],
-    rocks: [{ pos: [1.5, 0, 0.6], scale: 0.8, color: STONE_DARK }],
-  },
-  {
-    // Mustard island – south-west
-    position: [-8, -1.2, 5],
-    color: MUSTARD,
-    radiusTop: 1.9,
-    radiusBottom: 1.5,
-    height: 0.68,
-    segments: 7,
-    bobSpeed: 0.55,
-    trees: [[0, 1.1, 0]],
-    rocks: [
-      { pos: [-1.8, 0, -0.5], scale: 1.1 },
-      { pos: [1.3, 0, 1], scale: 0.6, color: CORAL },
-    ],
-  },
-  {
-    // Cream island – south-east
-    position: [6, -0.8, 7],
-    color: CREAM,
-    radiusTop: 1.6,
-    radiusBottom: 1.2,
-    height: 0.62,
-    segments: 6,
-    bobSpeed: 0.5,
-    trees: [[-0.5, 0.75, 0.3]],
-    rocks: [{ pos: [1, 0, -0.4], scale: 0.7, color: STONE_DARK }],
-  },
-  {
-    // Teal island – north-west
-    position: [-7, -0.9, -7],
-    color: TEAL,
-    radiusTop: 1.7,
-    radiusBottom: 1.3,
-    height: 0.62,
-    segments: 7,
-    bobSpeed: 0.4,
-    trees: [
-      [0.8, 0.85, -0.3],
-      [-0.5, 1, 0.6],
-    ],
-    rocks: [],
-  },
-  {
-    // Small cream stepping stone
-    position: [3, -1.6, -3],
-    color: CREAM,
-    radiusTop: 1.2,
-    radiusBottom: 0.9,
-    height: 0.48,
-    segments: 6,
-    bobSpeed: 0.6,
-    trees: [],
-    rocks: [{ pos: [0.5, 0, 0.2], scale: 0.5, color: STONE }],
-  },
-  {
-    // Additional tiny islands
-    position: [11, -1.2, 1],
-    color: SAND,
-    radiusTop: 1.1,
-    radiusBottom: 0.8,
-    height: 0.42,
-    segments: 6,
-    bobSpeed: 0.62,
-    trees: [],
-    rocks: [{ pos: [0.25, 0, 0.2], scale: 0.45 }],
-  },
-  {
-    position: [0, -1.4, 10],
-    color: MUSTARD,
-    radiusTop: 1,
-    radiusBottom: 0.75,
-    height: 0.4,
-    segments: 6,
-    bobSpeed: 0.58,
-    trees: [],
-    rocks: [],
-  },
-  {
-    position: [-11, -1.15, 0],
-    color: CORAL,
-    radiusTop: 1.15,
-    radiusBottom: 0.82,
-    height: 0.44,
-    segments: 6,
-    bobSpeed: 0.63,
-    trees: [],
-    rocks: [{ pos: [0.2, 0, -0.2], scale: 0.4 }],
-  },
-  {
-    position: [8, -1.3, 9],
-    color: TEAL,
-    radiusTop: 0.95,
-    radiusBottom: 0.7,
-    height: 0.36,
-    segments: 6,
-    bobSpeed: 0.67,
-    trees: [],
-    rocks: [],
-  },
-  {
-    position: [-9, -1.35, 8],
-    color: CREAM,
-    radiusTop: 1,
-    radiusBottom: 0.72,
-    height: 0.38,
-    segments: 6,
-    bobSpeed: 0.64,
-    trees: [],
-    rocks: [],
-  },
-  {
-    position: [9, -1.25, -9],
-    color: SAND,
-    radiusTop: 0.9,
-    radiusBottom: 0.65,
-    height: 0.34,
-    segments: 6,
-    bobSpeed: 0.7,
-    trees: [],
-    rocks: [],
-  },
-  {
-    position: [-10, -1.3, -9],
-    color: MUSTARD,
-    radiusTop: 1.05,
-    radiusBottom: 0.74,
-    height: 0.4,
-    segments: 6,
-    bobSpeed: 0.66,
-    trees: [],
-    rocks: [{ pos: [0.3, 0, 0], scale: 0.42 }],
-  },
-];
+const MAIN_ISLAND: IslandConfig = {
+  x: 0,
+  z: 0,
+  radius: 6.4,
+  topY: WATER_Y + 1.85,
+  seed: 1011,
+  segments: 18,
+  // The avatar ring reaches ~2.9 units from the centre; scatter starts at 3.4.
+  clearRadius: 3.4,
+  // Back-left, away from the default camera, so it frames the island without
+  // standing between the camera and the avatars.
+  lighthouseAt: [-5.0, -3.1],
+  palms: 6,
+  rocks: 3,
+  bushes: 5,
+};
+
+const ISLANDS: IslandConfig[] = (() => {
+  const rnd = mulberry32(20261107);
+  const list: IslandConfig[] = [];
+
+  for (let i = 0; i < 11; i++) {
+    const angle = (i / 11) * Math.PI * 2 + rnd() * 0.55;
+    const distance = 10 + rnd() * 7;
+    const radius = 1.3 + rnd() * 1.8;
+    list.push({
+      x: Math.cos(angle) * distance,
+      z: Math.sin(angle) * distance,
+      radius,
+      topY: WATER_Y + 0.75 + rnd() * 0.6,
+      seed: 2000 + i * 137,
+      segments: 12 + Math.floor(rnd() * 5),
+      palms: rnd() > 0.4 ? 1 + Math.floor(rnd() * 2) : 0,
+      rocks: Math.floor(rnd() * 2),
+      bushes: Math.floor(rnd() * 3),
+    });
+  }
+
+  return list;
+})();
+
+/** Channel markers, placed in the open water around the main island. */
+const BUOYS = (() => {
+  const rnd = mulberry32(99173);
+  return Array.from({ length: 9 }, (_, i) => {
+    const angle = (i / 9) * Math.PI * 2 + 0.4 + rnd() * 0.28;
+    const distance = 7.9 + rnd() * 1.2;
+    return {
+      position: [
+        Math.cos(angle) * distance,
+        WATER_Y + 0.16,
+        Math.sin(angle) * distance,
+      ] as [number, number, number],
+      seed: 500 + i * 41,
+    };
+  });
+})();
 
 // ---------------------------------------------------------------------------
 // Main scene component
 // ---------------------------------------------------------------------------
+
+interface IslandWorldProps {
+  users: User[];
+  myId: string;
+  myPosition: [number, number, number];
+  myColor: string;
+  onAvatarClick: (userId: string) => void;
+}
 
 export function IslandWorld({
   users,
@@ -674,9 +1273,9 @@ export function IslandWorld({
   myColor,
   onAvatarClick,
 }: IslandWorldProps) {
-  const centerIsland = ISLANDS[0];
-  const centerSurfaceY =
-    centerIsland.position[1] + (centerIsland.height ?? 1) / 2 + 0.5;
+  // Feet on the sand: the character is modelled from y=0 up.
+  const surfaceY = MAIN_ISLAND.topY + 0.06;
+
   const remoteUsers = users.filter((u) => u.id !== myId);
   const remoteAvatarPositions = useMemo(() => {
     return remoteUsers.map((_, index) => {
@@ -684,29 +1283,41 @@ export function IslandWorld({
       const ring = Math.floor(index / perRing);
       const indexInRing = index % perRing;
       const angle = (indexInRing / perRing) * Math.PI * 2 + ring * 0.35;
-      const radius = 1.8 + ring * 0.9;
+      const radius = 2.2 + ring * 0.85;
 
       return [
-        centerIsland.position[0] + Math.cos(angle) * radius,
-        centerSurfaceY,
-        centerIsland.position[2] + Math.sin(angle) * radius,
+        MAIN_ISLAND.x + Math.cos(angle) * radius,
+        surfaceY,
+        MAIN_ISLAND.z + Math.sin(angle) * radius,
       ] as [number, number, number];
     });
-  }, [remoteUsers, centerIsland.position, centerSurfaceY]);
+  }, [remoteUsers, surfaceY]);
 
   const localAvatarPosition: [number, number, number] = [
-    centerIsland.position[0],
-    centerSurfaceY,
-    centerIsland.position[2],
+    MAIN_ISLAND.x,
+    surfaceY,
+    MAIN_ISLAND.z,
+  ];
+
+  const overlayRef = useRef<HTMLDivElement>(null);
+
+  const labelItems: LabelItem[] = [
+    { id: myId, label: "You", position: localAvatarPosition, isLocal: true },
+    ...remoteUsers.map((user, index) => ({
+      id: user.id,
+      label: user.id.slice(0, 6),
+      position: remoteAvatarPositions[index],
+      isLocal: false,
+    })),
   ];
 
   void myPosition;
 
   return (
-    <div className="w-full h-screen">
+    <div className="relative h-screen w-full">
       <Canvas
         shadows="percentage"
-        camera={{ position: [12, 10, 12], fov: 55 }}
+        camera={{ position: [13, 11, 13], fov: 55 }}
         style={{
           // Cream paper instead of a sky gradient: the scene sits on the same
           // surface as the UI rather than floating in a different one.
@@ -714,69 +1325,74 @@ export function IslandWorld({
         }}
       >
         {/* ---- Lighting ---- */}
-        {/* Flatter than before on purpose: toon bands need even fill, and the
-            old 1.2-intensity key light produced soft gradients. */}
-        <ambientLight intensity={0.85} />
+        {/* Flat on purpose: toon bands need even fill, and a hot key light
+            reproduces the smooth gradient this art direction removes. */}
+        <ambientLight intensity={0.78} />
         <directionalLight
           position={[15, 20, 10]}
-          intensity={0.75}
+          intensity={0.95}
           castShadow
           shadow-mapSize-width={2048}
           shadow-mapSize-height={2048}
-          shadow-camera-left={-20}
-          shadow-camera-right={20}
-          shadow-camera-top={20}
-          shadow-camera-bottom={-20}
+          shadow-camera-left={-26}
+          shadow-camera-right={26}
+          shadow-camera-top={26}
+          shadow-camera-bottom={-26}
           shadow-camera-near={0.5}
-          shadow-camera-far={60}
+          shadow-camera-far={70}
         />
 
-        {/* ---- Fog for depth / horizon blend ---- */}
-        <fog attach="fog" args={[CREAM, 26, 70]} />
+        {/* ---- Fog, in the page colour so distance fades into the document ---- */}
+        <fog attach="fog" args={[CREAM, 30, 80]} />
 
-        {/* ---- Camera controls ---- */}
         <OrbitControls
           enablePan
           enableZoom
           enableRotate
-          minDistance={6}
-          maxDistance={30}
+          minDistance={7}
+          maxDistance={34}
           maxPolarAngle={Math.PI / 2.1}
           target={[0, 0, 0]}
         />
 
-        {/* ---- Ocean ---- */}
         <Ocean />
 
-        {/* ---- Islands ---- */}
-        {ISLANDS.map((island, i) => (
-          <Island key={`island-${i}`} config={island} />
+        <Island config={MAIN_ISLAND} />
+        {ISLANDS.map((island) => (
+          <Island key={`island-${island.seed}`} config={island} />
         ))}
 
-        {/* ---- Local user avatar ---- */}
         <Avatar
           position={localAvatarPosition}
           color={myColor}
-          id={myId}
           isLocal
           available
         />
 
-        {/* ---- Remote user avatars ---- */}
         {remoteUsers.map((user, index) => (
           <Avatar
             key={user.id}
             position={remoteAvatarPositions[index]}
             color={user.color}
-            id={user.id}
             available={user.available}
             onClick={() => onAvatarClick(user.id)}
           />
         ))}
 
-        {/* ---- Ambient floating particles ---- */}
-        <Particles count={60} />
+        {BUOYS.map((buoy) => (
+          <Buoy key={buoy.seed} position={buoy.position} seed={buoy.seed} />
+        ))}
+
+        <Spray count={40} />
+
+        <WorldLabels items={labelItems} overlay={overlayRef} />
       </Canvas>
+
+      {/* Labels live in the DOM, above the canvas. */}
+      <div
+        ref={overlayRef}
+        className="pointer-events-none absolute inset-0 overflow-hidden"
+      />
     </div>
   );
 }
