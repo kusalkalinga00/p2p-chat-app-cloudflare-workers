@@ -766,20 +766,22 @@ function Buoy({
     group.rotation.x = Math.cos(t * 1.05 + phase * 0.7) * 0.07;
   });
 
+  // Tall and slim with a pointed finial: a round cap on a short body read as a
+  // tiny character's head from the default camera.
   return (
-    <group ref={ref} position={position} scale={1.6}>
-      <mesh position={[0, 0.18, 0]} castShadow>
-        <coneGeometry args={[0.26, 0.44, 9]} />
+    <group ref={ref} position={position} scale={1.25}>
+      <mesh position={[0, 0.44, 0]} castShadow>
+        <coneGeometry args={[0.15, 0.86, 9]} />
         <meshToonMaterial color={CORAL} gradientMap={TOON_RAMP} flatShading />
         <InkOutline />
       </mesh>
-      <mesh position={[0, 0.42, 0]} castShadow>
-        <cylinderGeometry args={[0.19, 0.22, 0.14, 9]} />
+      <mesh position={[0, 0.5, 0]} castShadow>
+        <cylinderGeometry args={[0.115, 0.13, 0.1, 9]} />
         <meshToonMaterial color={CREAM} gradientMap={TOON_RAMP} flatShading />
         <InkOutline />
       </mesh>
-      <mesh position={[0, 0.56, 0]} castShadow>
-        <sphereGeometry args={[0.08, 8, 8]} />
+      <mesh position={[0, 0.95, 0]} castShadow>
+        <coneGeometry args={[0.06, 0.16, 8]} />
         <meshToonMaterial
           color={MUSTARD}
           gradientMap={TOON_RAMP}
