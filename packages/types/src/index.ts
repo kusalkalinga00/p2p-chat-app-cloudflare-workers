@@ -51,6 +51,18 @@ export interface IceConfigResponse {
 export interface E2eeKeyPayload {
   /** base64 SPKI of an ephemeral ECDH P-256 public key. */
   publicKey: string;
+  /**
+   * Derivation protocol version. A mismatch is rejected before any keys are
+   * used, because two versions would derive different chains and fail only
+   * when the first message is decrypted.
+   */
+  version: number;
+}
+
+/** Proof that both ends derived the same shared secret. */
+export interface E2eeConfirmPayload {
+  /** base64 HMAC-SHA256 over the key-exchange transcript. */
+  tag: string;
 }
 
 /** ICE payload, structurally compatible with `RTCIceCandidateInit`. */
@@ -84,7 +96,9 @@ export type ClientMessage =
   | { type: "rtc-offer"; target: string; payload: SessionDescription }
   | { type: "rtc-answer"; target: string; payload: SessionDescription }
   | { type: "rtc-ice-candidate"; target: string; payload: IceCandidate }
-  | { type: "e2ee-key"; target: string; payload: E2eeKeyPayload };
+  | { type: "e2ee-key"; target: string; payload: E2eeKeyPayload }
+  /** Key-confirmation tag: proves both sides derived the same secret. */
+  | { type: "e2ee-confirm"; target: string; payload: E2eeConfirmPayload };
 
 // ---------------------------------------------------------------------------
 // Server → client
@@ -117,6 +131,7 @@ export type ServerMessage =
   | { type: "rtc-answer"; from: string; payload: SessionDescription }
   | { type: "rtc-ice-candidate"; from: string; payload: IceCandidate }
   | { type: "e2ee-key"; from: string; payload: E2eeKeyPayload }
+  | { type: "e2ee-confirm"; from: string; payload: E2eeConfirmPayload }
   /** The peer you were chatting with disconnected. */
   | { type: "peer-left"; id: string }
   | { type: "error"; code: ServerErrorCode; message: string };

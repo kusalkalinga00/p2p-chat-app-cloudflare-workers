@@ -20,7 +20,7 @@ import type {
 } from "@p2p-chat/types";
 import { INVITATION_TIMEOUT_MS, WORLD_ORIGIN } from "./lib/constants";
 import { getIceConfig, prefetchIceConfig } from "./lib/ice";
-import { ChatCipher } from "./lib/e2ee";
+import { ChatCipher, E2EE_VERSION } from "./lib/e2ee";
 import { randomColor, randomPosition } from "./lib/utils";
 
 /** Close code the server uses when a newer connection claims our ID. */
@@ -45,7 +45,13 @@ function App() {
   const [isBotClosed, setIsBotClosed] = useState(false);
   /** E2EE handshake finished and message chains are usable. */
   const [e2eeReady, setE2eeReady] = useState(false);
-  /** Four emoji both sides must see identically; null until derived. */
+  /** Both ends proved they derived the same secret (HMAC confirmation). */
+  const [e2eeConfirmed, setE2eeConfirmed] = useState(false);
+  /** The local user compared the safety string and said it matches. */
+  const [e2eeVerified, setE2eeVerified] = useState(false);
+  /** Set when the handshake or confirmation fails; blocks the composer. */
+  const [e2eeError, setE2eeError] = useState<string | null>(null);
+  /** Eight emoji both sides must see identically; null until derived. */
   const [safetyString, setSafetyString] = useState<string[] | null>(null);
   const [userChangeMessage, setUserChangeMessage] = useState<string | null>(
     null,
@@ -78,6 +84,11 @@ function App() {
 
   /** Per-chat end-to-end encryption state; discarded when the chat ends. */
   const cipherRef = useRef<ChatCipher | null>(null);
+  /**
+   * Human verification, mirrored in a ref so the send path (a stable callback)
+   * reads the current value rather than the one captured at render time.
+   */
+  const verifiedRef = useRef(false);
 
   const shouldReconnectRef = useRef(true);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -406,6 +417,10 @@ function App() {
       setMessages([]);
       setView("chat");
       setE2eeReady(false);
+      setE2eeConfirmed(false);
+      setE2eeVerified(false);
+      setE2eeError(null);
+      verifiedRef.current = false;
       setSafetyString(null);
 
       // Start the E2EE handshake alongside the WebRTC one. The role decides
@@ -421,9 +436,16 @@ function App() {
       void cipher
         .init()
         .then((publicKey) => {
-          wsSend({ type: "e2ee-key", target: peerId, payload: { publicKey } });
+          wsSend({
+            type: "e2ee-key",
+            target: peerId,
+            payload: { publicKey, version: E2EE_VERSION },
+          });
         })
-        .catch((err) => console.error("[e2ee] key generation failed:", err));
+        .catch((err) => {
+          console.error("[e2ee] key generation failed:", err);
+          setE2eeError("Could not generate encryption keys.");
+        });
 
       // The offerer kicks off WebRTC negotiations
       if (offerer) {
@@ -444,6 +466,10 @@ function App() {
     // gets new ephemeral keys, so past messages cannot be read from this state.
     cipherRef.current = null;
     setE2eeReady(false);
+    setE2eeConfirmed(false);
+    setE2eeVerified(false);
+    setE2eeError(null);
+    verifiedRef.current = false;
     setSafetyString(null);
     setChatTarget(null);
     setMessages([]);
@@ -453,6 +479,18 @@ function App() {
     // available again and nobody is left talking to a closed channel.
     wsSend({ type: "chat-leave" });
   }, [cleanupRtc, wsSend]);
+
+  /** The user compared the safety string and both sides showed the same. */
+  const confirmSafety = useCallback(() => {
+    verifiedRef.current = true;
+    setE2eeVerified(true);
+  }, []);
+
+  /** The user says the safety strings differ: treat it as an active attack. */
+  const rejectSafety = useCallback(() => {
+    setNotice("Safety codes did not match — the chat was closed.");
+    leaveChat();
+  }, [leaveChat, setNotice]);
 
   // ────────────────────────────────────────────────────────────────
   // WebSocket message handler
@@ -536,24 +574,61 @@ function App() {
           void (async () => {
             const cipher = cipherRef.current;
             if (!cipher) return;
+
+            if (data.payload.version !== E2EE_VERSION) {
+              console.error(
+                `[e2ee] protocol version mismatch (peer ${data.payload.version}, local ${E2EE_VERSION})`,
+              );
+              setE2eeError(
+                "The other side is running an incompatible version of the app.",
+              );
+              return;
+            }
+
             try {
+              // Safe even if our own key generation has not settled yet:
+              // derive() waits for it rather than dropping the peer's key.
               await cipher.derive(data.payload.publicKey);
               setE2eeReady(cipher.ready);
-              setSafetyString(cipher.safetyString ? [...cipher.safetyString] : null);
+              setSafetyString(
+                cipher.safetyString ? [...cipher.safetyString] : null,
+              );
+
+              const tag = await cipher.confirmationTag();
+              wsSend({
+                type: "e2ee-confirm",
+                target: data.from,
+                payload: { tag },
+              });
             } catch (err) {
               console.error("[e2ee] key agreement failed:", err);
+              setE2eeError("Could not establish encryption with this peer.");
+            }
+          })();
+          break;
+
+        case "e2ee-confirm":
+          void (async () => {
+            const cipher = cipherRef.current;
+            if (!cipher) return;
+            try {
+              await cipher.verifyConfirmation(data.payload.tag);
+              setE2eeConfirmed(cipher.confirmed);
+            } catch (err) {
+              // The peer could not prove it holds the same shared secret.
+              // That is what a relay sitting in the middle looks like, so the
+              // session is torn down rather than left half-trusted.
+              console.error("[e2ee] key confirmation failed:", err);
+              setNotice("Encryption check failed — the chat was closed.");
+              leaveChat();
             }
           })();
           break;
 
         case "peer-left":
           if (chatTarget === data.id) {
-            cleanupRtc();
-            setChatTarget(null);
-            setMessages([]);
-            setView("world");
             setNotice("Your chat partner disconnected.");
-            wsSend({ type: "chat-leave" });
+            leaveChat();
           }
           break;
 
@@ -571,7 +646,7 @@ function App() {
       handleOffer,
       handleAnswer,
       handleIceCandidate,
-      cleanupRtc,
+      leaveChat,
       playSound,
       showUserChange,
       wsSend,
@@ -756,8 +831,17 @@ function App() {
   const sendChatMessage = useCallback((text: string) => {
     const dc = dcRef.current;
     const cipher = cipherRef.current;
-    // No plaintext fallback: if the keys are not ready, nothing is sent.
-    if (!dc || dc.readyState !== "open" || !cipher?.ready) return;
+    // No plaintext fallback: the channel, the keys, the cryptographic
+    // confirmation and the human verification must all be in place.
+    if (
+      !dc ||
+      dc.readyState !== "open" ||
+      !cipher?.ready ||
+      !cipher.confirmed ||
+      !verifiedRef.current
+    ) {
+      return;
+    }
 
     // Show it locally straight away; the wire only ever sees ciphertext.
     setMessages((prev) => [
@@ -916,7 +1000,15 @@ function App() {
           rtcStatus={rtcStatus}
           onSend={sendChatMessage}
           onLeave={leaveChat}
-          e2ee={{ ready: e2eeReady, safety: safetyString }}
+          e2ee={{
+            ready: e2eeReady,
+            confirmed: e2eeConfirmed,
+            verified: e2eeVerified,
+            safety: safetyString,
+            error: e2eeError,
+            onVerify: confirmSafety,
+            onReject: rejectSafety,
+          }}
         />
       )}
     </div>

@@ -214,6 +214,25 @@ async function main() {
   assert.equal(candidate.from, "user-b");
   ok("ICE candidate is relayed to the paired peer");
 
+  a.send({
+    type: "e2ee-key",
+    target: "user-b",
+    payload: { publicKey: "cGF5bG9hZA==", version: 2 },
+  });
+  const keyMessage = await b.next("e2ee-key");
+  assert.equal(keyMessage.from, "user-a");
+  assert.equal(keyMessage.payload.version, 2);
+  ok("E2EE public key is relayed to the paired peer");
+
+  b.send({
+    type: "e2ee-confirm",
+    target: "user-a",
+    payload: { tag: "dGFn" },
+  });
+  const confirmMessage = await a.next("e2ee-confirm");
+  assert.equal(confirmMessage.from, "user-b");
+  ok("E2EE key confirmation is relayed to the paired peer");
+
   // ── Authorization ─────────────────────────────────────────────────
   const c = connect("user-c");
   await c.opened;
@@ -228,6 +247,15 @@ async function main() {
   const notPaired = await c.next("error");
   assert.equal(notPaired.code, "not-paired");
   ok("unpaired peer cannot push signaling at another user");
+
+  c.send({
+    type: "e2ee-confirm",
+    target: "user-a",
+    payload: { tag: "forged" },
+  });
+  const notPairedConfirm = await c.next("error");
+  assert.equal(notPairedConfirm.code, "not-paired");
+  ok("unpaired peer cannot relay an E2EE confirmation");
 
   c.send({ type: "totally-made-up", target: "user-a" });
   const unknown = await c.next("error");
