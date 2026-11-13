@@ -80,8 +80,8 @@ function App() {
 
   /** Per-chat end-to-end encryption state; discarded when the chat ends. */
   const cipherRef = useRef<ChatCipher | null>(null);
-  /** Confirmation tag to send as soon as the DataChannel opens. */
-  const pendingConfirmRef = useRef<string | null>(null);
+  /** True once this side's confirmation tag has been put on the wire. */
+  const confirmSentRef = useRef(false);
   /** Peer confirmation that arrived before our keys were derived. */
   const pendingPeerConfirmRef = useRef<string | null>(null);
 
@@ -157,8 +157,11 @@ function App() {
   /** Tear down the RTCPeerConnection & DataChannel cleanly. */
   const cleanupRtc = useCallback(() => {
     pendingCandidatesRef.current = [];
-    pendingConfirmRef.current = null;
-    pendingPeerConfirmRef.current = null;
+    // Do NOT clear the confirmation buffers here: createPeerConnection calls
+    // this during setup, and the key exchange can finish before the WebRTC
+    // offer arrives. Dropping a buffered tag at that point leaves this side
+    // waiting for a confirmation it already has, and the peer never gets one.
+    // enterChat/leaveChat clear them at the real session boundaries.
     dcRef.current?.close();
     dcRef.current = null;
     pcRef.current?.close();
@@ -202,6 +205,35 @@ function App() {
     }
   }, []);
 
+  /**
+   * Sends this side's confirmation tag once the DataChannel can carry it.
+   *
+   * The key exchange and the channel open in either order, so both the key
+   * handler and `onopen` call this. `confirmSentRef` makes it idempotent, and
+   * the tag is recomputed instead of buffered — a buffered tag can be dropped
+   * by a peer-connection reset, which leaves one side confirmed and the other
+   * waiting forever.
+   */
+  const sendConfirmTag = useCallback((dc: RTCDataChannel) => {
+    const cipher = cipherRef.current;
+    if (!cipher?.ready || confirmSentRef.current) return;
+
+    confirmSentRef.current = true;
+    void cipher
+      .confirmationTag()
+      .then((tag) => {
+        if (dc.readyState === "open") {
+          dc.send(JSON.stringify({ t: "confirm", tag }));
+        } else {
+          confirmSentRef.current = false;
+        }
+      })
+      .catch((err) => {
+        confirmSentRef.current = false;
+        console.error("[e2ee] could not build the confirmation tag:", err);
+      });
+  }, []);
+
   /** Wire up DataChannel events (shared by offerer & answerer). */
   const setupDataChannel = useCallback(
     (dc: RTCDataChannel) => {
@@ -210,14 +242,8 @@ function App() {
       dc.onopen = () => {
         console.log("[WebRTC] DataChannel open");
         setRtcStatus("connected");
-
-        // Keys are often derived before the channel opens. Send the pending
-        // confirmation now that it can travel peer to peer.
-        const pending = pendingConfirmRef.current;
-        if (pending) {
-          pendingConfirmRef.current = null;
-          dc.send(JSON.stringify({ t: "confirm", tag: pending }));
-        }
+        // Keys are often derived before the channel opens.
+        sendConfirmTag(dc);
       };
 
       dc.onclose = () => {
@@ -295,7 +321,7 @@ function App() {
         }
       };
     },
-    [applyConfirmation, playSound],
+    [applyConfirmation, playSound, sendConfirmTag],
   );
 
   /** Create a new peer connection and hook it up. */
@@ -456,7 +482,7 @@ function App() {
       setE2eeReady(false);
       setE2eeConfirmed(false);
       setE2eeError(null);
-      pendingConfirmRef.current = null;
+      confirmSentRef.current = false;
       pendingPeerConfirmRef.current = null;
 
       // Start the E2EE handshake alongside the WebRTC one. The role decides
@@ -501,6 +527,8 @@ function App() {
     // Drop the keys with the chat: the next conversation is a new session and
     // gets new ephemeral keys, so past messages cannot be read from this state.
     cipherRef.current = null;
+    confirmSentRef.current = false;
+    pendingPeerConfirmRef.current = null;
     setE2eeReady(false);
     setE2eeConfirmed(false);
     setE2eeError(null);
@@ -614,14 +642,10 @@ function App() {
 
               // The tag travels peer to peer on the DataChannel, not through
               // the signalling relay, so a Worker deployment that is behind
-              // the client cannot wedge the handshake.
-              const tag = await cipher.confirmationTag();
+              // the client cannot wedge the handshake. If the channel is not
+              // open yet, dc.onopen sends it instead.
               const dc = dcRef.current;
-              if (dc?.readyState === "open") {
-                dc.send(JSON.stringify({ t: "confirm", tag }));
-              } else {
-                pendingConfirmRef.current = tag;
-              }
+              if (dc) sendConfirmTag(dc);
 
               // A confirmation can arrive on the DataChannel before the key
               // exchange finishes. Apply it now that derive() has completed.
@@ -659,6 +683,7 @@ function App() {
       handleAnswer,
       handleIceCandidate,
       applyConfirmation,
+      sendConfirmTag,
       leaveChat,
       playSound,
       showUserChange,
