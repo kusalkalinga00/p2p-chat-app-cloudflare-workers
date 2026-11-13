@@ -6,7 +6,7 @@
 
 Two browsers, one Durable Object, and a WebRTC DataChannel. The server signs people in, introduces them, and relays the handshake — then gets out of the way. Messages travel browser to browser, so the Worker that connected you cannot read them.
 
-Chat messages are also end-to-end encrypted above the channel: a per-chat ephemeral ECDH exchange, a symmetric ratchet, and an eight-emoji safety string both people compare before the first message. Content is private from the server; *metadata and IP addresses are not* — see [Privacy and encryption](#privacy-and-encryption).
+Chat messages are also end-to-end encrypted above the channel: a per-chat ephemeral ECDH exchange, a key-confirmation HMAC, and a symmetric ratchet. Content is private from the server; *metadata, IP addresses and peer identity are not* — see [Privacy and encryption](#privacy-and-encryption).
 
 It is deliberately small: a text chat, no accounts, no history, no database. Everything interesting is in the seam between the two halves.
 
@@ -122,15 +122,15 @@ Chat content is encrypted end to end. Everything else about the conversation is 
 
 - **Message contents.** Each chat derives fresh ephemeral ECDH P-256 keys; the signalling relay forwards the public keys but never sees a private key or a message key. HKDF-SHA256 splits the shared secret into two directional chains, and every message advances a symmetric ratchet, so a message key is used once and the chain key that produced it is discarded. AES-256-GCM with the room id as associated data gives confidentiality and integrity, and a replayed or cross-room ciphertext is rejected.
 - **The server never receives plaintext.** Messages travel over the DataChannel, not the WebSocket, and there is no plaintext fallback: if the keys are not ready, nothing is sent.
-- **A tampering relay is detectable.** Both sides derive an eight-emoji safety string from the two public keys (40 bits). Messaging stays locked until the user compares it with the peer and confirms it matches. If the emoji differ, the chat is closed. A relay that substitutes keys cannot make both sides show the same string except by guessing 40 bits in real time.
-- **Key confirmation.** Each side sends an HMAC over the key-exchange transcript, keyed from the shared secret. If the peer cannot produce a matching tag, the session is torn down before the first message instead of failing later on decryption.
+- **Key confirmation.** Each side sends an HMAC over the key-exchange transcript, keyed from the shared secret. If the peer cannot produce a matching tag, the session is torn down before the first message instead of failing later on decryption. This proves both ends derived the same secret; it does not prove who the peer is.
 
 **What is not protected**
 
+- **Peer authentication.** The ECDH keys are exchanged over the signalling relay, so a relay that actively joins two sessions can sit in the middle and read both sides. There is no out-of-band channel between two strangers, so there is no honest way to detect that: asking them to compare a code inside the chat would be circular, because whoever is in the middle can rewrite the code too. For that reason the app deliberately has no safety-code step, and "end-to-end encrypted" here means the server and relay cannot read the chat passively — not that the person on the other end is who they claim to be.
 - **IP addresses.** WebRTC candidates reveal where you are. With a TURN server configured the client sets `iceTransportPolicy: "relay"`, so the peer only ever sees the relay. Without TURN, or with `VITE_ICE_POLICY=all`, a direct connection exposes your public IP — and sometimes your LAN address — to the person you are talking to. That is the largest anonymity gap, and it is a property of peer-to-peer, not of the encryption.
 - **Metadata.** Cloudflare sees which UUIDs connect, who invited whom, the room id, and the timing and size of the signalling exchange. TURN sees the same for relayed sessions. The server does not see message contents or lengths: those go over the DataChannel.
 - **Identity.** There are no accounts: a UUID is generated per page load, so nobody can prove who they were talking to. "Anonymous" here means unaccountable, not untraceable.
-- **Forward secrecy across sessions.** Keys are per chat and discarded on leave. There is no long-term identity key and no ratchet across sessions, so reopening a chat starts over with a new safety string.
+- **Forward secrecy across sessions.** Keys are per chat and discarded on leave. There is no long-term identity key and no ratchet across sessions, so reopening a chat starts over with new ephemeral keys.
 
 The cryptography is hand-rolled on WebCrypto rather than an audited protocol such as Signal's. The construction is deliberately standard (ECDH → HKDF → ratchet → AES-GCM) and covered by [`apps/client/scripts/e2ee-smoke.mjs`](apps/client/scripts/e2ee-smoke.mjs), but it has not had an external review.
 
@@ -234,7 +234,7 @@ Each of these is a bug that was found, understood and closed. This is the part o
 
 **Signalling is authorised against server state.** The DO pairs two users on acceptance and relays only between that pair. Without it, anyone who reads the bundle can find the relay and push an SDP offer at a stranger.
 
-**The safety string is the security property, not decoration.** Four emoji out of sixteen was a 16-bit check: a relay that controls both substituted keys could grind a collision offline in milliseconds. It is now eight emoji out of thirty-two — 40 bits — and messaging stays locked until both people compare it and press *they match*. Without that step an active relay terminates two sessions and reads everything while every cryptographic check passes. Key confirmation (an HMAC over the transcript) is a second, separate check: it catches a peer that is not holding the same secret before the first message, but it cannot detect a relay, because a relay legitimately holds a different secret with each side.
+**The E2EE does not authenticate the peer, and the app does not pretend otherwise.** An earlier version derived an eight-emoji safety string and locked messaging until both people compared it. That looked like security but was circular here: the only channel two strangers share is the chat being protected, so a relay in the middle could rewrite the code along with the messages. The step was removed. Ephemeral ECDH still stops the relay reading passively, and the confirmation HMAC still catches a peer that did not derive the same secret, but an active man in the middle is out of scope without a second, independent channel. Key confirmation is deliberately still present: it verifies agreement on the secret, not identity.
 
 **A reconnect can race the old socket's close.** Each page load mints a new UUID, but a reconnect within a session reuses the id. If the old socket is still half-open, the world ends up with two sockets claiming one id: a duplicate avatar, and messages routed to the dead one. On `spawn`, any other socket with that id is closed with code `4001` — and the client treats `4001` as "another tab won", not as a reason to reconnect.
 
@@ -285,11 +285,11 @@ p2p-chat-app-cloudflare-workers/
 │   │       ├── App.tsx              the whole client state machine
 │   │       ├── components/
 │   │       │   ├── IslandWorld.tsx  the 3D scene: ocean, islands, avatars
-│   │       │   ├── PrivateChat.tsx  chat overlay + safety verification
+│   │       │   ├── PrivateChat.tsx  chat overlay + encryption status
 │   │       │   ├── InvitationModal.tsx
 │   │       │   └── WorldBot.tsx
 │   │       └── lib/
-│   │           ├── e2ee.ts          ECDH, ratchet, safety string, confirmation
+│   │           ├── e2ee.ts          ECDH, ratchet, key confirmation
 │   │           ├── ice.ts           fetches /ice, caches until expiry
 │   │           ├── constants.ts
 │   │           └── utils.ts
@@ -326,7 +326,7 @@ Reconnects use exponential backoff capped at 8 seconds, and the socket is closed
 
 `lib/ice.ts` caches the ICE configuration until a minute before its TTL, deduplicates concurrent requests, and falls back to public STUN on any failure.
 
-`lib/e2ee.ts` is the other stateful piece: each chat owns one `ChatCipher`, which generates an ephemeral P-256 key, waits for the peer's key (including when it arrives before key generation has settled), derives two directional chains, and is discarded when the chat ends. The chat overlay keeps the composer locked until the confirmation HMAC verifies and the user has compared the eight emoji.
+`lib/e2ee.ts` is the other stateful piece: each chat owns one `ChatCipher`, which generates an ephemeral P-256 key, waits for the peer's key (including when it arrives before key generation has settled), derives two directional chains, and is discarded when the chat ends. The chat overlay keeps the composer locked until the confirmation HMAC verifies.
 
 The 3D scene is cheap on purpose: one instanced mesh for the particles, flat shading everywhere, and per-vertex wave animation on a single 80×80 ocean plane. It still ships a 1.2 MB bundle, because three.js is three.js.
 
