@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useMemo, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import { useThree } from "@react-three/fiber";
@@ -72,6 +72,16 @@ function mulberry32(seed: number) {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+/** FNV-1a, used to give each avatar its own stable walk. */
+function hashString(value: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
 }
 
 /** Overshoot easing: runs past 1 before settling, which is what sells a pop. */
@@ -446,11 +456,8 @@ function Ocean() {
 }
 
 // ---------------------------------------------------------------------------
-// Sky and sun – a slow day cycle driving colour, fog and light
+// Sky and sun – driven by the viewer's local time
 // ---------------------------------------------------------------------------
-
-/** Seconds for one full day: sunrise, noon, sunset, night. */
-const DAY_SECONDS = 120;
 
 const SKY_VERTEX = /* glsl */ `
   varying vec3 vDir;
@@ -599,9 +606,11 @@ const WHITE = new THREE.Color("#ffffff");
 /**
  * Owns the sky dome, the sun, and every light in the scene.
  *
- * The cycle starts at sunrise, so opening the app shows the sun coming up and
- * then a full day passing. Time is the clock's elapsed seconds rather than a
- * React state value: this updates every frame and must not trigger renders.
+ * The sun is placed from the viewer's local clock rather than a fixed loop:
+ * 06:00 is sunrise, 12:00 noon, 18:00 sunset, 00:00 midnight. The scene
+ * therefore matches the time of day where the user actually is, and the light
+ * drifts slowly instead of racing through a minute-long day. Without a
+ * location lookup, sunrise and sunset are assumed to be at 6 and 18.
  */
 function DayCycle() {
   const { scene, camera } = useThree();
@@ -613,9 +622,14 @@ function DayCycle() {
   const sunCoreRef = useRef<THREE.MeshBasicMaterial>(null);
   const sunHaloRef = useRef<THREE.MeshBasicMaterial>(null);
 
-  useFrame(({ clock }) => {
-    // 0 = sunrise, π/2 = noon, π = sunset, 3π/2 = midnight.
-    const theta = (clock.elapsedTime / DAY_SECONDS) * Math.PI * 2;
+  useFrame(() => {
+    // Local clock, including minutes and seconds, so the sun moves smoothly
+    // rather than stepping once an hour.
+    const now = new Date();
+    const hours =
+      now.getHours() + now.getMinutes() / 60 + now.getSeconds() / 3600;
+    // 06:00 → 0 (horizon, rising), 12:00 → π/2 (zenith), 18:00 → π.
+    const theta = ((hours - 6) / 24) * Math.PI * 2;
     const elevation = Math.sin(theta);
 
     SUN_DIR.set(Math.cos(theta) * 0.86, elevation, 0.38).normalize();
@@ -1797,13 +1811,23 @@ function AvailabilityRing({ available }: { available: boolean }) {
 // Avatar
 // ---------------------------------------------------------------------------
 
+/** Where an avatar currently is, so its DOM label can follow it. */
+const AVATAR_WORLD = new Map<string, THREE.Vector3>();
+
+/** Wander bounds: the plaza, so nobody strolls into the sea or a cottage. */
+const WANDER_RADIUS = 8.4;
+const WANDER_INNER = 1.2;
+const WALK_SPEED = 0.85;
+
 function Avatar({
+  id,
   position,
   color,
   isLocal = false,
   available = true,
   onClick,
 }: {
+  id: string;
   position: [number, number, number];
   color: string;
   isLocal?: boolean;
@@ -1820,7 +1844,31 @@ function Avatar({
   const bornAt = useRef<number | null>(null);
   const pressedAt = useRef<number | null>(null);
 
-  useFrame(({ clock }) => {
+  // Each avatar walks on its own seeded schedule: pick a spot, walk to it,
+  // then stand for a few seconds. State is in a ref so the frame loop never
+  // triggers a render.
+  const walk = useRef({
+    x: position[0],
+    z: position[2],
+    targetX: position[0],
+    targetZ: position[2],
+    moving: false,
+    waitUntil: 2 + (hashString(id) % 500) / 100,
+    random: mulberry32(hashString(id)),
+  });
+
+  // The DOM label reads this instead of the static spawn point.
+  const worldPos = useRef(
+    new THREE.Vector3(position[0], position[1], position[2]),
+  );
+  useEffect(() => {
+    AVATAR_WORLD.set(id, worldPos.current);
+    return () => {
+      AVATAR_WORLD.delete(id);
+    };
+  }, [id]);
+
+  useFrame(({ clock }, delta) => {
     const outer = groupRef.current;
     const body = bodyRef.current;
     if (!outer || !body) return;
@@ -1829,8 +1877,37 @@ function Avatar({
     nowRef.current = t;
     if (bornAt.current === null) bornAt.current = t;
 
-    const bounce = Math.sin(t * 2 + position[0]) * 0.08;
-    outer.position.y = position[1] + bounce + (hovered ? 0.12 : 0);
+    const w = walk.current;
+
+    // A hovered avatar holds still, so it stays easy to click.
+    if (!hovered) {
+      if (w.moving) {
+        const dx = w.targetX - w.x;
+        const dz = w.targetZ - w.z;
+        const distance = Math.hypot(dx, dz);
+        if (distance < 0.08) {
+          w.moving = false;
+          w.waitUntil = t + 2.5 + w.random() * 5;
+        } else {
+          // Clamp the step: a tab that was in the background must not make
+          // the character jump across the plaza on its first frame back.
+          const step = Math.min(WALK_SPEED * Math.min(delta, 0.1), distance);
+          w.x += (dx / distance) * step;
+          w.z += (dz / distance) * step;
+        }
+      } else if (t >= w.waitUntil) {
+        const angle = w.random() * Math.PI * 2;
+        const radius =
+          WANDER_INNER + w.random() * (WANDER_RADIUS - WANDER_INNER);
+        w.targetX = Math.cos(angle) * radius;
+        w.targetZ = Math.sin(angle) * radius;
+        w.moving = true;
+      }
+    }
+
+    // No idle bob: feet stay on the ground. Only the hover lift moves them.
+    outer.position.set(w.x, position[1] + (hovered ? 0.12 : 0), w.z);
+    worldPos.current.set(w.x, position[1], w.z);
 
     // Arriving pops: scale runs slightly past 1 and settles.
     const age = t - bornAt.current;
@@ -1934,9 +2011,14 @@ function WorldLabels({ items }: { items: LabelItem[] }) {
       const el = LABEL_NODES.get(item.id);
       if (!el) continue;
 
-      projected
-        .set(item.position[0], item.position[1] + 1.45, item.position[2])
-        .project(camera);
+      // Walk with the avatar: the map holds its live position, and the static
+      // spawn point is only a fallback for the first frame.
+      const live = AVATAR_WORLD.get(item.id);
+      const px = live ? live.x : item.position[0];
+      const py = live ? live.y : item.position[1];
+      const pz = live ? live.z : item.position[2];
+
+      projected.set(px, py + 1.45, pz).project(camera);
 
       // Behind the camera, or far outside the viewport: hide rather than draw
       // a mirrored label at the wrong place.
@@ -1950,9 +2032,7 @@ function WorldLabels({ items }: { items: LabelItem[] }) {
       const y = (-projected.y * 0.5 + 0.5) * height;
 
       // Shrink slightly with distance, like a diegetic tag would.
-      const distance = camera.position.distanceTo(
-        projected.set(item.position[0], item.position[1], item.position[2]),
-      );
+      const distance = camera.position.distanceTo(projected.set(px, py, pz));
       const scale = THREE.MathUtils.clamp(16 / distance, 0.62, 1.15);
 
       // Position with left/top and centre with a single transform. Putting the
@@ -2283,6 +2363,7 @@ export function IslandWorld({
         ))}
 
         <Avatar
+          id={myId}
           position={localAvatarPosition}
           color={myColor}
           isLocal
@@ -2292,6 +2373,7 @@ export function IslandWorld({
         {remoteUsers.map((user, index) => (
           <Avatar
             key={user.id}
+            id={user.id}
             position={remoteAvatarPositions[index]}
             color={user.color}
             available={user.available}
