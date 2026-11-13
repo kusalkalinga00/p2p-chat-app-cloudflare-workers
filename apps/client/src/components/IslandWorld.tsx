@@ -338,13 +338,13 @@ function Ocean() {
   // vertices are jittered once so the facets are irregular, like hand-cut
   // tiles; the border ring stays put so the plane still covers the view.
   const geometry = useMemo(() => {
-    const geo = new THREE.PlaneGeometry(400, 400, 66, 66);
+    const geo = new THREE.PlaneGeometry(520, 520, 76, 76);
     const pos = geo.attributes.position;
     const rnd = mulberry32(4242);
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i);
       const y = pos.getY(i);
-      if (Math.abs(x) < 190 && Math.abs(y) < 190) {
+      if (Math.abs(x) < 248 && Math.abs(y) < 248) {
         pos.setX(i, x + (rnd() - 0.5) * 2.6);
         pos.setY(i, y + (rnd() - 0.5) * 2.6);
       }
@@ -689,15 +689,15 @@ function DayCycle() {
         castShadow
         shadow-mapSize-width={2048}
         shadow-mapSize-height={2048}
-        shadow-camera-left={-34}
-        shadow-camera-right={34}
-        shadow-camera-top={34}
-        shadow-camera-bottom={-34}
+        shadow-camera-left={-48}
+        shadow-camera-right={48}
+        shadow-camera-top={48}
+        shadow-camera-bottom={-48}
         shadow-camera-near={0.5}
-        shadow-camera-far={90}
+        shadow-camera-far={120}
       />
 
-      <fog attach="fog" args={[CREAM, 70, 200]} />
+      <fog attach="fog" args={[CREAM, 90, 220]} />
 
       {/* Sky dome. Back-faced and huge, with depth writes off so it always
           sits behind the scene but never fights the depth buffer. */}
@@ -1419,7 +1419,7 @@ function House({
 function Plaza({ y }: { y: number }) {
   return (
     <mesh position={[0, y - 0.08, 0]} castShadow receiveShadow>
-      <cylinderGeometry args={[6.2, 6.5, 0.16, 32]} />
+      <cylinderGeometry args={[9.6, 10.0, 0.16, 40]} />
       <meshToonMaterial color={STONE} gradientMap={TOON_RAMP} flatShading />
       <InkOutline />
     </mesh>
@@ -1448,33 +1448,34 @@ function Pier({
   const deckY = WATER_Y + 0.5;
 
   const posts: [number, number][] = [
-    [-0.42, 0.3],
-    [0.42, 0.3],
-    [-0.42, 1.6],
-    [0.42, 1.6],
-    [-0.42, 2.9],
-    [0.42, 2.9],
+    [-0.52, 0.4],
+    [0.52, 0.4],
+    [-0.52, 2.0],
+    [0.52, 2.0],
+    [-0.52, 3.8],
+    [0.52, 3.8],
   ];
 
   return (
     <group position={[x, deckY, z]} rotation={[0, yaw, 0]}>
-      {/* deck, reaching from the waterline out */}
-      <mesh position={[0, 0, 1.6]} castShadow receiveShadow>
-        <boxGeometry args={[1.05, 0.14, 3.4]} />
+      {/* Deck, starting at the waterline. The old beach ramp was sized for a
+          much smaller island and floated above the sand at this scale. */}
+      <mesh position={[0, 0, 2.1]} castShadow receiveShadow>
+        <boxGeometry args={[1.3, 0.16, 4.6]} />
         <meshToonMaterial color={TRUNK} gradientMap={TOON_RAMP} flatShading />
         <InkOutline />
       </mesh>
 
-      {/* ramp up to the sand */}
-      <mesh position={[0, 0.34, -0.58]} rotation={[0.5, 0, 0]} castShadow>
-        <boxGeometry args={[0.92, 0.1, 1.5]} />
+      {/* One step down to the wet sand. */}
+      <mesh position={[0, -0.2, -0.28]} castShadow>
+        <boxGeometry args={[1.3, 0.14, 0.55]} />
         <meshToonMaterial color={TRUNK} gradientMap={TOON_RAMP} flatShading />
         <InkOutline />
       </mesh>
 
       {posts.map(([px, pz], i) => (
         <mesh key={`post-${i}`} position={[px, -0.55, pz]} castShadow>
-          <cylinderGeometry args={[0.07, 0.08, 1.4, 6]} />
+          <cylinderGeometry args={[0.08, 0.09, 1.4, 6]} />
           <meshToonMaterial
             color={TRUNK}
             gradientMap={TOON_RAMP}
@@ -1485,8 +1486,8 @@ function Pier({
       ))}
 
       {/* crates waiting to be loaded */}
-      <mesh position={[0.18, 0.24, 2.2]} rotation={[0, 0.45, 0]} castShadow>
-        <boxGeometry args={[0.36, 0.36, 0.36]} />
+      <mesh position={[0.22, 0.25, 3.0]} rotation={[0, 0.45, 0]} castShadow>
+        <boxGeometry args={[0.42, 0.42, 0.42]} />
         <meshToonMaterial
           color={SAND_MID}
           gradientMap={TOON_RAMP}
@@ -1494,8 +1495,8 @@ function Pier({
         />
         <InkOutline />
       </mesh>
-      <mesh position={[-0.24, 0.19, 1.4]} rotation={[0, 0.2, 0]} castShadow>
-        <boxGeometry args={[0.28, 0.28, 0.28]} />
+      <mesh position={[-0.28, 0.21, 2.1]} rotation={[0, 0.2, 0]} castShadow>
+        <boxGeometry args={[0.34, 0.34, 0.34]} />
         <meshToonMaterial color={SAND} gradientMap={TOON_RAMP} flatShading />
         <InkOutline />
       </mesh>
@@ -1527,7 +1528,7 @@ function Character({ color }: { color: string }) {
 
   return (
     <group ref={ref}>
-      {/* Contact shadow. The shadow map is spread over ~52 units, far too
+      {/* Contact shadow. The shadow map is spread over ~96 units, far too
           coarse to anchor something this small to the ground. */}
       <mesh
         position={[0.05, 0.012, 0.03]}
@@ -1792,10 +1793,10 @@ function WorldLabels({ items }: { items: LabelItem[] }) {
 // Sea spray
 // ---------------------------------------------------------------------------
 
-const SPRAY = Array.from({ length: 80 }, () => ({
-  x: (Math.random() - 0.5) * 96,
+const SPRAY = Array.from({ length: 110 }, () => ({
+  x: (Math.random() - 0.5) * 140,
   y: Math.random() * 4 + 0.4,
-  z: (Math.random() - 0.5) * 96,
+  z: (Math.random() - 0.5) * 140,
   speed: 0.3 + Math.random() * 0.5,
   phase: Math.random() * Math.PI * 2,
 }));
@@ -1839,18 +1840,19 @@ function Spray({ count = 40 }: { count?: number }) {
 const MAIN_ISLAND: IslandConfig = {
   x: 0,
   z: 0,
-  // Twice the old radius: the marked-out boundary in the reference sketch.
-  radius: 16.5,
-  topY: WATER_Y + 2.05,
+  // Sized to the zoomed-out view: at maximum zoom the island should fill most
+  // of the frame instead of leaving a ring of empty sea around it.
+  radius: 26,
+  topY: WATER_Y + 2.1,
   seed: 1011,
   // More segments keep the long coastline from reading as a polygon.
-  segments: 40,
-  // The plaza is ~12 units across and the scatter starts outside it.
-  clearRadius: 7.2,
+  segments: 52,
+  // The plaza is ~19 units across and the scatter starts outside it.
+  clearRadius: 11.2,
   plaza: true,
-  // Back-left, out toward the new shoreline, so it still frames the island.
-  // 0.8 of the rim at this angle (~13.5), so it stays on the cap.
-  lighthouseAt: [-9.2, -5.7],
+  // Back-left, out toward the shoreline, at 0.8 of the rim at this angle
+  // (~21.2), so it stays on the cap.
+  lighthouseAt: [-14.4, -9.0],
   // Out the front-right, away from the lighthouse.
   pierAt: 0.49,
   houses: [
@@ -1860,11 +1862,11 @@ const MAIN_ISLAND: IslandConfig = {
     { angle: 4.36, dist: 0.68, scale: 1.3, roof: CORAL },
     { angle: 5.5, dist: 0.63, scale: 1.2, roof: MUSTARD },
   ],
-  // The land is four times the old area; fill it rather than leaving bare
-  // sand between the village and the water.
-  palms: 20,
-  rocks: 12,
-  bushes: 18,
+  // The land is roughly ten times the original area; fill it rather than
+  // leaving bare sand between the village and the water.
+  palms: 30,
+  rocks: 18,
+  bushes: 26,
 };
 
 const ISLANDS: IslandConfig[] = (() => {
@@ -1873,8 +1875,8 @@ const ISLANDS: IslandConfig[] = (() => {
 
   for (let i = 0; i < 5; i++) {
     const angle = (i / 5) * Math.PI * 2 + rnd() * 0.5;
-    // Far out on the horizon, well beyond the boat lane.
-    const distance = 85 + rnd() * 35;
+    // Far out on the horizon, well beyond the boat lane and the zoom limit.
+    const distance = 110 + rnd() * 40;
     const radius = 2.5 + rnd() * 2.0;
     list.push({
       x: Math.cos(angle) * distance,
@@ -1892,13 +1894,16 @@ const ISLANDS: IslandConfig[] = (() => {
   return list;
 })();
 
-/** Channel markers, placed in the open water around the main island. */
+/** Channel markers, just outside the waterline all the way around. */
 const BUOYS = (() => {
   const rnd = mulberry32(99173);
-  return Array.from({ length: 9 }, (_, i) => {
-    const angle = (i / 9) * Math.PI * 2 + 0.95 + rnd() * 0.28;
-    // Just outside the new shoreline, which reaches about 22 units.
-    const distance = 23.6 + rnd() * 1.4;
+  const shoreline = makeShoreline(MAIN_ISLAND.seed);
+  return Array.from({ length: 11 }, (_, i) => {
+    const angle = (i / 11) * Math.PI * 2 + 0.95 + rnd() * 0.24;
+    // The waterline sits at ~1.24× the sand rim. Following the actual
+    // shoreline keeps a marker off the beach where the coast juts out.
+    const rim = MAIN_ISLAND.radius * shoreFactor(shoreline, angle);
+    const distance = rim * (1.29 + rnd() * 0.04);
     return {
       position: [
         Math.cos(angle) * distance,
@@ -1917,40 +1922,40 @@ const BUOYS = (() => {
  */
 const BOATS = [
   {
-    radius: 30.5,
+    radius: 46,
     speed: 0.045,
     phase: 0.4,
     direction: 1,
     hull: CORAL,
     sail: CREAM,
-    scale: 1.4,
+    scale: 1.8,
   },
   {
-    radius: 32.5,
+    radius: 49,
     speed: 0.036,
     phase: 2.6,
     direction: -1,
     hull: TEAL,
     sail: MUSTARD,
-    scale: 1.6,
+    scale: 2.0,
   },
   {
-    radius: 34.5,
+    radius: 52,
     speed: 0.06,
     phase: 4.4,
     direction: 1,
     hull: MUSTARD,
     sail: CORAL,
-    scale: 1.3,
+    scale: 1.7,
   },
   {
-    radius: 36.5,
+    radius: 56,
     speed: 0.03,
     phase: 5.6,
     direction: -1,
     hull: CREAM,
     sail: TEAL,
-    scale: 1.5,
+    scale: 1.9,
   },
 ] as const;
 
@@ -1983,7 +1988,7 @@ export function IslandWorld({
       const ring = Math.floor(index / perRing);
       const indexInRing = index % perRing;
       const angle = (indexInRing / perRing) * Math.PI * 2 + ring * 0.35;
-      const radius = 4.8 + ring * 1.9;
+      const radius = 7.2 + ring * 2.6;
 
       return [
         MAIN_ISLAND.x + Math.cos(angle) * radius,
@@ -2015,7 +2020,7 @@ export function IslandWorld({
     <div className="relative h-screen w-full">
       <Canvas
         shadows="percentage"
-        camera={{ position: [32, 26, 32], fov: 55 }}
+        camera={{ position: [35, 28, 35], fov: 55 }}
         style={{
           // Fallback only: the sky dome covers the canvas from the first frame.
           // Kept close to the dawn horizon so there is no flash on mount.
@@ -2028,8 +2033,8 @@ export function IslandWorld({
           enablePan
           enableZoom
           enableRotate
-          minDistance={28}
-          maxDistance={70}
+          minDistance={30}
+          maxDistance={62}
           maxPolarAngle={Math.PI / 2.1}
           target={[0, 0, 0]}
         />
@@ -2066,7 +2071,7 @@ export function IslandWorld({
           <Boat key={`boat-${i}`} {...boat} />
         ))}
 
-        <Spray count={80} />
+        <Spray count={110} />
 
         <WorldLabels items={labelItems} />
       </Canvas>
