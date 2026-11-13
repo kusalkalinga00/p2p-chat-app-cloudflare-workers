@@ -53,13 +53,13 @@ const ECDH = { name: "ECDH", namedCurve: "P-256" } as const;
 const AES = { name: "AES-GCM", length: 256 } as const;
 
 /** Bump when the derivation changes; mixed versions must fail loudly. */
-const PROTOCOL = "island-chat/e2ee/v3";
+const PROTOCOL = "island-chat/e2ee/v4";
 
 /**
  * Version advertised on the wire so a peer running different derivation code
  * is rejected with a clear message instead of silently deriving other keys.
  */
-export const E2EE_VERSION = 3;
+export const E2EE_VERSION = 4;
 
 /** How far ahead of the expected counter a message may jump. */
 const MAX_SKIP = 256;
