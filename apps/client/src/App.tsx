@@ -80,6 +80,10 @@ function App() {
 
   /** Per-chat end-to-end encryption state; discarded when the chat ends. */
   const cipherRef = useRef<ChatCipher | null>(null);
+  /** Confirmation tag to send as soon as the DataChannel opens. */
+  const pendingConfirmRef = useRef<string | null>(null);
+  /** Peer confirmation that arrived before our keys were derived. */
+  const pendingPeerConfirmRef = useRef<string | null>(null);
 
   const shouldReconnectRef = useRef(true);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -153,6 +157,8 @@ function App() {
   /** Tear down the RTCPeerConnection & DataChannel cleanly. */
   const cleanupRtc = useCallback(() => {
     pendingCandidatesRef.current = [];
+    pendingConfirmRef.current = null;
+    pendingPeerConfirmRef.current = null;
     dcRef.current?.close();
     dcRef.current = null;
     pcRef.current?.close();
@@ -177,6 +183,25 @@ function App() {
     }
   }, []);
 
+  /**
+   * Verifies the peer's key-confirmation tag. The tag travels over the
+   * DataChannel rather than the signalling relay, so a Worker deployment that
+   * is behind the client cannot wedge the handshake.
+   */
+  const applyConfirmation = useCallback(async (tag: string) => {
+    const cipher = cipherRef.current;
+    if (!cipher) return;
+    try {
+      await cipher.verifyConfirmation(tag);
+      setE2eeConfirmed(cipher.confirmed);
+    } catch (err) {
+      console.error("[e2ee] key confirmation failed:", err);
+      setE2eeError(
+        "The encryption handshake did not complete. Leave and start the chat again.",
+      );
+    }
+  }, []);
+
   /** Wire up DataChannel events (shared by offerer & answerer). */
   const setupDataChannel = useCallback(
     (dc: RTCDataChannel) => {
@@ -185,6 +210,14 @@ function App() {
       dc.onopen = () => {
         console.log("[WebRTC] DataChannel open");
         setRtcStatus("connected");
+
+        // Keys are often derived before the channel opens. Send the pending
+        // confirmation now that it can travel peer to peer.
+        const pending = pendingConfirmRef.current;
+        if (pending) {
+          pendingConfirmRef.current = null;
+          dc.send(JSON.stringify({ t: "confirm", tag: pending }));
+        }
       };
 
       dc.onclose = () => {
@@ -195,21 +228,34 @@ function App() {
       dc.onmessage = async (e) => {
         const cipher = cipherRef.current;
 
-        // Everything on this channel is ciphertext. A frame that is not a
-        // well-formed envelope is dropped rather than shown: never render
-        // unverified bytes as if a peer had sent them.
-        let envelope: { n?: unknown; c?: unknown };
+        let frame: { t?: unknown; tag?: unknown; n?: unknown; c?: unknown };
         try {
-          envelope = JSON.parse(String(e.data));
+          frame = JSON.parse(String(e.data));
         } catch {
           console.warn("[e2ee] dropped a frame that was not JSON");
           return;
         }
 
+        // Control frame: the key-confirmation tag. It is not user content.
+        if (frame.t === "confirm") {
+          if (typeof frame.tag !== "string") return;
+          if (!cipher?.ready) {
+            // The key exchange and the channel can race. Hold the tag until
+            // derive() finishes; the key handler applies it.
+            pendingPeerConfirmRef.current = frame.tag;
+            return;
+          }
+          await applyConfirmation(frame.tag);
+          return;
+        }
+
+        // Everything else on this channel is ciphertext. A frame that is not
+        // a well-formed envelope is dropped rather than shown: never render
+        // unverified bytes as if a peer had sent them.
         if (
           !cipher?.ready ||
-          typeof envelope.n !== "number" ||
-          typeof envelope.c !== "string"
+          typeof frame.n !== "number" ||
+          typeof frame.c !== "string"
         ) {
           console.warn("[e2ee] dropped a malformed message envelope");
           return;
@@ -217,7 +263,7 @@ function App() {
 
         let text: string;
         try {
-          text = await cipher.decrypt({ n: envelope.n, c: envelope.c });
+          text = await cipher.decrypt({ n: frame.n, c: frame.c });
         } catch (err) {
           console.warn("[e2ee] decryption failed:", err);
           setMessages((prev) => [
@@ -249,7 +295,7 @@ function App() {
         }
       };
     },
-    [playSound],
+    [applyConfirmation, playSound],
   );
 
   /** Create a new peer connection and hook it up. */
@@ -410,6 +456,8 @@ function App() {
       setE2eeReady(false);
       setE2eeConfirmed(false);
       setE2eeError(null);
+      pendingConfirmRef.current = null;
+      pendingPeerConfirmRef.current = null;
 
       // Start the E2EE handshake alongside the WebRTC one. The role decides
       // which of the two derived chains each side sends on, so the two ends
@@ -564,33 +612,27 @@ function App() {
               await cipher.derive(data.payload.publicKey);
               setE2eeReady(cipher.ready);
 
+              // The tag travels peer to peer on the DataChannel, not through
+              // the signalling relay, so a Worker deployment that is behind
+              // the client cannot wedge the handshake.
               const tag = await cipher.confirmationTag();
-              wsSend({
-                type: "e2ee-confirm",
-                target: data.from,
-                payload: { tag },
-              });
+              const dc = dcRef.current;
+              if (dc?.readyState === "open") {
+                dc.send(JSON.stringify({ t: "confirm", tag }));
+              } else {
+                pendingConfirmRef.current = tag;
+              }
+
+              // A confirmation can arrive on the DataChannel before the key
+              // exchange finishes. Apply it now that derive() has completed.
+              const buffered = pendingPeerConfirmRef.current;
+              if (buffered) {
+                pendingPeerConfirmRef.current = null;
+                await applyConfirmation(buffered);
+              }
             } catch (err) {
               console.error("[e2ee] key agreement failed:", err);
               setE2eeError("Could not establish encryption with this peer.");
-            }
-          })();
-          break;
-
-        case "e2ee-confirm":
-          void (async () => {
-            const cipher = cipherRef.current;
-            if (!cipher) return;
-            try {
-              await cipher.verifyConfirmation(data.payload.tag);
-              setE2eeConfirmed(cipher.confirmed);
-            } catch (err) {
-              // The peer could not prove it holds the same shared secret.
-              // That means the two ends disagree about the handshake, so the
-              // session is torn down rather than left half-trusted.
-              console.error("[e2ee] key confirmation failed:", err);
-              setNotice("Encryption check failed — the chat was closed.");
-              leaveChat();
             }
           })();
           break;
@@ -616,10 +658,10 @@ function App() {
       handleOffer,
       handleAnswer,
       handleIceCandidate,
+      applyConfirmation,
       leaveChat,
       playSound,
       showUserChange,
-      wsSend,
     ],
   );
 

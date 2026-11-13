@@ -122,7 +122,7 @@ Chat content is encrypted end to end. Everything else about the conversation is 
 
 - **Message contents.** Each chat derives fresh ephemeral ECDH P-256 keys; the signalling relay forwards the public keys but never sees a private key or a message key. HKDF-SHA256 splits the shared secret into two directional chains, and every message advances a symmetric ratchet, so a message key is used once and the chain key that produced it is discarded. AES-256-GCM with the room id as associated data gives confidentiality and integrity, and a replayed or cross-room ciphertext is rejected.
 - **The server never receives plaintext.** Messages travel over the DataChannel, not the WebSocket, and there is no plaintext fallback: if the keys are not ready, nothing is sent.
-- **Key confirmation.** Each side sends an HMAC over the key-exchange transcript, keyed from the shared secret. If the peer cannot produce a matching tag, the session is torn down before the first message instead of failing later on decryption. This proves both ends derived the same secret; it does not prove who the peer is.
+- **Key confirmation.** Each side sends an HMAC over the key-exchange transcript, keyed from the shared secret, as a control frame on the DataChannel. If the peer cannot produce a matching tag, the session is torn down before the first message instead of failing later on decryption. This proves both ends derived the same secret; it does not prove who the peer is.
 
 **What is not protected**
 
@@ -208,7 +208,6 @@ Every message is a discriminated union member of `ClientMessage` or `ServerMessa
 | `rtc-offer`, `rtc-answer` | `target, payload` | SDP |
 | `rtc-ice-candidate` | `target, payload` | ICE |
 | `e2ee-key` | `target, publicKey, version` | Ephemeral ECDH public key (opaque to the relay) |
-| `e2ee-confirm` | `target, tag` | HMAC proving both sides derived the same secret |
 
 **Server → client**
 
@@ -218,9 +217,11 @@ Every message is a discriminated union member of `ClientMessage` or `ServerMessa
 | `availability-changed` | Someone entered or left a chat |
 | `chat-request`, `chat-response`, `chat-cancelled` | Invitation flow |
 | `rtc-offer`, `rtc-answer`, `rtc-ice-candidate` | Relayed signalling |
-| `e2ee-key`, `e2ee-confirm` | Relayed key exchange and key confirmation |
+| `e2ee-key` | Relayed public key |
 | `peer-left` | Your chat partner disconnected |
 | `error` | `busy`, `not-found`, `bad-message`, `too-large`, `not-paired`, `already-paired` |
+
+The key-confirmation tag is **not** in this protocol: once the DataChannel is open it travels peer to peer as a control frame, so the relay is not needed for the second half of the handshake.
 
 The `error` type exists because of a specific lesson: the first version broadcast any unrecognised message type to the whole world, which turned the Durable Object into an open fan-out relay any client could spam. Unknown types are now rejected.
 
@@ -298,7 +299,7 @@ p2p-chat-app-cloudflare-workers/
 │       │   ├── index.ts             router, /ice, CORS, provider selection
 │       │   ├── world.ts             the World Durable Object
 │       │   └── rate-limiter.ts      the IceRateLimiter Durable Object
-│       ├── scripts/smoke.mjs        25 protocol checks against a live DO
+│       ├── scripts/smoke.mjs        23 protocol checks against a live DO
 │       └── wrangler.toml            bindings, migrations, documented vars
 ├── packages/types/src/index.ts      the wire protocol, shared by both ends
 ├── infra/turn/                      coturn in Docker, for local TURN testing
@@ -450,7 +451,7 @@ WORLD_URL=wss://p2p-chat-server.kusalkalingainfo.workers.dev \
   node apps/server/scripts/smoke.mjs
 ```
 
-25 checks: presence, the invitation handshake, relay authorisation, unknown-message rejection, pairing release, and the reconnect/ghost-socket path. Locally, `pnpm --filter server smoke` against `pnpm --filter server dev`.
+23 checks: presence, the invitation handshake, relay authorisation, unknown-message rejection, pairing release, and the reconnect/ghost-socket path. Locally, `pnpm --filter server smoke` against `pnpm --filter server dev`.
 
 **3. Two devices, one on mobile data.** The only test that exercises the relay. Wi-Fi to Wi-Fi connects with or without TURN and proves nothing: laptop on Wi-Fi, phone on a carrier network, invite each other. It should connect, and it should be measurably slower than the direct case.
 
