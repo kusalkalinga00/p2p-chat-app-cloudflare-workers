@@ -31,6 +31,8 @@ const FOLIAGE_LIGHT = "#2aa392";
 const TRUNK = "#b98a5f";
 const COCONUT = "#c98a5f";
 const STONE = "#c2b3a4";
+/** Paving: a touch darker than the plaza stone so the streets read as roads. */
+const ROAD = "#b3a390";
 
 /** Height of the sea surface. Everything else is positioned against it. */
 const WATER_Y = -2.4;
@@ -895,6 +897,140 @@ function Bush({
 }
 
 // ---------------------------------------------------------------------------
+// Streets – flat strips that follow the island's cap
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the paved network for a town.
+ *
+ * The island top is a shallow dome, not a plane, so a road laid flat at one
+ * height either floats at the edge or sinks in the middle. Every vertex is
+ * therefore lifted to the cap height at its own position: the height function
+ * mirrors the three rings `buildIsland` uses for the cap (centre, inner ring,
+ * rim). A wider strip in ink underneath gives the roads the same outline as
+ * every other solid in the scene.
+ */
+function buildRoads(
+  radius: number,
+  topY: number,
+  shoreline: Shoreline,
+  roads: RoadSpec[],
+): RoadNetwork {
+  const capY = (x: number, z: number) => {
+    const angle = Math.atan2(z, x);
+    const rim = radius * shoreFactor(shoreline, angle);
+    const f = Math.min(Math.hypot(x, z) / rim, 1);
+    const lift =
+      f <= 0.52
+        ? 0.14 - 0.08 * (f / 0.52)
+        : 0.06 - 0.06 * ((f - 0.52) / 0.48);
+    return topY + lift;
+  };
+
+  const keepOut: { x: number; z: number; r: number }[] = [];
+
+  const build = (extraWidth: number, lift: number, collect: boolean) => {
+    const positions: number[] = [];
+    const indices: number[] = [];
+
+    const strip = (
+      points: { x: number; z: number }[],
+      width: number,
+      closed: boolean,
+      roadLift: number,
+    ) => {
+      const half = width / 2;
+      const start = positions.length / 3;
+      const count = points.length;
+
+      for (let i = 0; i < count; i++) {
+        const point = points[i];
+        const prev = closed
+          ? points[(i - 1 + count) % count]
+          : points[Math.max(i - 1, 0)];
+        const next = closed
+          ? points[(i + 1) % count]
+          : points[Math.min(i + 1, count - 1)];
+
+        let tx = next.x - prev.x;
+        let tz = next.z - prev.z;
+        const length = Math.hypot(tx, tz) || 1;
+        tx /= length;
+        tz /= length;
+
+        // Left normal of the centreline.
+        const nx = -tz;
+        const nz = tx;
+        const lx = point.x + nx * half;
+        const lz = point.z + nz * half;
+        const rx = point.x - nx * half;
+        const rz = point.z - nz * half;
+
+        positions.push(lx, capY(lx, lz) + roadLift, lz);
+        positions.push(rx, capY(rx, rz) + roadLift, rz);
+      }
+
+      const quads = closed ? count : count - 1;
+      for (let i = 0; i < quads; i++) {
+        const a = start + i * 2;
+        const b = start + ((i + 1) % count) * 2;
+        // +Y winding, so the road is lit from above.
+        indices.push(a, b, a + 1, a + 1, b, b + 1);
+      }
+    };
+
+    for (const road of roads) {
+      if (road.kind === "ring") {
+        const points = Array.from({ length: 96 }, (_, i) => {
+          const angle = (i / 96) * Math.PI * 2;
+          // Fixed radius: the town is planned, not contoured.
+          const r = radius * road.fraction;
+          return { x: Math.cos(angle) * r, z: Math.sin(angle) * r };
+        });
+        strip(points, road.width + extraWidth, true, lift);
+        if (collect) {
+          for (const p of points) {
+            keepOut.push({ x: p.x, z: p.z, r: road.width / 2 + 1 });
+          }
+        }
+      } else {
+        const steps = 16;
+        const points = Array.from({ length: steps }, (_, i) => {
+          const fraction = road.from + ((road.to - road.from) * i) / (steps - 1);
+          const r = radius * fraction;
+          return {
+            x: Math.cos(road.angle) * r,
+            z: Math.sin(road.angle) * r,
+          };
+        });
+        // Spokes sit a hair above the rings so the crossing is not coplanar.
+        strip(points, road.width + extraWidth, false, lift + 0.012);
+        if (collect) {
+          for (const p of points) {
+            keepOut.push({ x: p.x, z: p.z, r: road.width / 2 + 1 });
+          }
+        }
+      }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(positions, 3),
+    );
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+    return geometry;
+  };
+
+  return {
+    road: build(0, 0.05, true),
+    border: build(0.28, 0.035, false),
+    keepOut,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Island – one generated landform plus its scatter
 // ---------------------------------------------------------------------------
 
@@ -920,6 +1056,8 @@ interface IslandConfig {
   plaza?: boolean;
   /** Cottages, positioned by angle around the island and distance fraction. */
   houses?: HouseSpec[];
+  /** The street network, drawn on the island's cap. */
+  roads?: RoadSpec[];
   /** Angle for a wooden pier reaching into the sea, if this island has one. */
   pierAt?: number;
 }
@@ -934,6 +1072,23 @@ interface HouseSpec {
   walls?: string;
   /** Extra yaw on top of the default "face the plaza". */
   yaw?: number;
+}
+
+type RoadSpec =
+  | { kind: "ring"; fraction: number; width: number }
+  | {
+      kind: "spoke";
+      angle: number;
+      /** Fractions of the radius where the street starts and ends. */
+      from: number;
+      to: number;
+      width: number;
+    };
+
+interface RoadNetwork {
+  road: THREE.BufferGeometry;
+  border: THREE.BufferGeometry;
+  keepOut: { x: number; z: number; r: number }[];
 }
 
 function Island({ config }: { config: IslandConfig }) {
@@ -951,6 +1106,7 @@ function Island({ config }: { config: IslandConfig }) {
     lighthouseAt,
     plaza = false,
     houses = [],
+    roads = [],
     pierAt,
   } = config;
 
@@ -959,28 +1115,37 @@ function Island({ config }: { config: IslandConfig }) {
     [radius, topY, seed, segments],
   );
 
-  // Cottages sit in a ring outside the plaza. Position and yaw are derived
-  // from the same shoreline function the mesh uses, so a house can never end
-  // up half over the sand rim.
+  const roadNetwork = useMemo(
+    () =>
+      roads.length
+        ? buildRoads(radius, topY, geometry.shoreline, roads)
+        : null,
+    [geometry.shoreline, radius, roads, topY],
+  );
+
+  // Cottages sit on fixed rings, so the town reads as planned rather than
+  // following every wobble of the coast. The outermost ring is still inside
+  // the narrowest point of the shoreline.
   const housePlacements = useMemo(
     () =>
       houses.map((house) => {
-        const rr =
-          radius * house.dist * shoreFactor(geometry.shoreline, house.angle);
+        const rr = radius * house.dist;
         const hx = Math.cos(house.angle) * rr;
         const hz = Math.sin(house.angle) * rr;
         return {
           ...house,
           x: hx,
           z: hz,
-          // The door is on +Z: turn it toward the plaza.
+          // The door is on +Z: turn it toward the plaza (or, for the outer
+          // row, out toward its own ring road).
           rotation: Math.atan2(-hx, -hz) + (house.yaw ?? 0),
         };
       }),
-    [houses, geometry.shoreline, radius],
+    [houses, radius],
   );
 
-  // Scatter, kept clear of the avatar ring, the buildings, and the lighthouse.
+  // Scatter, kept clear of the avatar ring, the buildings, the streets, and
+  // the lighthouse.
   const scatter = useMemo(() => {
     const rnd = mulberry32(seed * 104729 + 7);
     const keepOut = [
@@ -989,6 +1154,7 @@ function Island({ config }: { config: IslandConfig }) {
         z: house.z,
         r: 1.5 * (house.scale ?? 1),
       })),
+      ...(roadNetwork ? roadNetwork.keepOut : []),
       ...(lighthouseAt
         ? [{ x: lighthouseAt[0], z: lighthouseAt[1], r: 2.8 }]
         : []),
@@ -999,7 +1165,7 @@ function Island({ config }: { config: IslandConfig }) {
       let z = 0;
       // Resample rather than nudge: a palm dropped on the lighthouse looks
       // worse than one fewer palm.
-      for (let attempt = 0; attempt < 16; attempt++) {
+      for (let attempt = 0; attempt < 32; attempt++) {
         const angle = rnd() * Math.PI * 2;
         const frac = minFrac + rnd() * (maxFrac - minFrac);
         const rr = Math.max(
@@ -1038,6 +1204,7 @@ function Island({ config }: { config: IslandConfig }) {
     lighthouseAt,
     palms,
     radius,
+    roadNetwork,
     rocks,
     bushes,
     seed,
@@ -1068,6 +1235,19 @@ function Island({ config }: { config: IslandConfig }) {
           depthWrite={false}
         />
       </mesh>
+
+      {/* Streets: an ink strip underneath a lighter paved strip, so the roads
+          get the same outline as the rest of the scene. */}
+      {roadNetwork && (
+        <>
+          <mesh geometry={roadNetwork.border}>
+            <meshBasicMaterial color={INK} />
+          </mesh>
+          <mesh geometry={roadNetwork.road} receiveShadow>
+            <meshToonMaterial color={ROAD} gradientMap={TOON_RAMP} />
+          </mesh>
+        </>
+      )}
 
       {plaza && <Plaza y={topY + 0.16} />}
 
@@ -1419,7 +1599,7 @@ function House({
 function Plaza({ y }: { y: number }) {
   return (
     <mesh position={[0, y - 0.08, 0]} castShadow receiveShadow>
-      <cylinderGeometry args={[9.6, 10.0, 0.16, 40]} />
+      <cylinderGeometry args={[9.2, 9.6, 0.16, 40]} />
       <meshToonMaterial color={STONE} gradientMap={TOON_RAMP} flatShading />
       <InkOutline />
     </mesh>
@@ -1837,6 +2017,65 @@ function Spray({ count = 40 }: { count?: number }) {
 // One big island, and a handful of small ones far out on the horizon. The old
 // near ring is gone: with the main island this wide it would have been beach.
 
+// Streets: two ring roads, four radial connectors, and a main street out to
+// the pier. All radii are fractions of the island radius, not of the local
+// shoreline: the town is planned, and its outermost paving is still inside
+// the narrowest part of the coast.
+const TOWN_ROADS: RoadSpec[] = [
+  { kind: "ring", fraction: 0.46, width: 1.8 },
+  { kind: "ring", fraction: 0.725, width: 1.6 },
+  { kind: "spoke", angle: Math.PI / 4, from: 0.35, to: 0.725, width: 1.6 },
+  {
+    kind: "spoke",
+    angle: (3 * Math.PI) / 4,
+    from: 0.35,
+    to: 0.725,
+    width: 1.6,
+  },
+  {
+    kind: "spoke",
+    angle: (5 * Math.PI) / 4,
+    from: 0.35,
+    to: 0.725,
+    width: 1.6,
+  },
+  {
+    kind: "spoke",
+    angle: (7 * Math.PI) / 4,
+    from: 0.35,
+    to: 0.725,
+    width: 1.6,
+  },
+  { kind: "spoke", angle: 0.49, from: 0.35, to: 0.92, width: 2.6 },
+];
+
+// Two rows of cottages lining the ring roads. Angles deliberately avoid the
+// main street (0.49 rad), the radial connectors (45/135/225/315°), and the
+// lighthouse (212°).
+const TOWN_HOUSES: HouseSpec[] = (() => {
+  const roofs = [CORAL, MUSTARD, TEAL];
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const angles = [15, 70, 100, 160, 190, 250, 285, 350];
+
+  return [
+    // Inner row: doors face the plaza and ring road A.
+    ...angles.map((deg, i) => ({
+      angle: toRad(deg),
+      dist: 0.545,
+      scale: 1.2 + (i % 3) * 0.075,
+      roof: roofs[i % 3],
+    })),
+    // Outer row: doors face outward onto ring road B, backs to the alley.
+    ...angles.map((deg, i) => ({
+      angle: toRad(deg),
+      dist: 0.64,
+      scale: 1.2 + ((i + 1) % 3) * 0.075,
+      roof: roofs[(i + 1) % 3],
+      yaw: Math.PI,
+    })),
+  ];
+})();
+
 const MAIN_ISLAND: IslandConfig = {
   x: 0,
   z: 0,
@@ -1847,26 +2086,21 @@ const MAIN_ISLAND: IslandConfig = {
   seed: 1011,
   // More segments keep the long coastline from reading as a polygon.
   segments: 52,
-  // The plaza is ~19 units across and the scatter starts outside it.
-  clearRadius: 11.2,
+  // The plaza is ~18 units across and the scatter starts outside it.
+  clearRadius: 10.6,
   plaza: true,
-  // Back-left, out toward the shoreline, at 0.8 of the rim at this angle
-  // (~21.2), so it stays on the cap.
-  lighthouseAt: [-14.4, -9.0],
+  // Back-left, at the very edge of the cap on that side (0.99 of the rim at
+  // this angle, ~21.0), like a lighthouse on the headland.
+  lighthouseAt: [-17.8, -11.1],
   // Out the front-right, away from the lighthouse.
   pierAt: 0.49,
-  houses: [
-    { angle: 0.79, dist: 0.66, scale: 1.25, roof: CORAL },
-    { angle: 1.83, dist: 0.7, scale: 1.4, roof: MUSTARD },
-    { angle: 2.62, dist: 0.64, scale: 1.15, roof: TEAL },
-    { angle: 4.36, dist: 0.68, scale: 1.3, roof: CORAL },
-    { angle: 5.5, dist: 0.63, scale: 1.2, roof: MUSTARD },
-  ],
-  // The land is roughly ten times the original area; fill it rather than
-  // leaving bare sand between the village and the water.
-  palms: 30,
-  rocks: 18,
-  bushes: 26,
+  houses: TOWN_HOUSES,
+  roads: TOWN_ROADS,
+  // The town covers the middle; palms, rocks and bushes fill the remaining
+  // land and the beach.
+  palms: 34,
+  rocks: 20,
+  bushes: 28,
 };
 
 const ISLANDS: IslandConfig[] = (() => {
@@ -1984,11 +2218,13 @@ export function IslandWorld({
   const remoteUsers = users.filter((u) => u.id !== myId);
   const remoteAvatarPositions = useMemo(() => {
     return remoteUsers.map((_, index) => {
-      const perRing = 8;
+      // Twelve per ring, so three rings still fit on the plaza before the
+      // inner ring road. The clamp keeps the fourth ring off the paving.
+      const perRing = 12;
       const ring = Math.floor(index / perRing);
       const indexInRing = index % perRing;
       const angle = (indexInRing / perRing) * Math.PI * 2 + ring * 0.35;
-      const radius = 7.2 + ring * 2.6;
+      const radius = Math.min(6.8 + ring * 1.7, 10.4);
 
       return [
         MAIN_ISLAND.x + Math.cos(angle) * radius,
