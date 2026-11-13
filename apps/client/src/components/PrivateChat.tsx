@@ -1,14 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import {
-  Send,
-  LogOut,
-  Wifi,
-  WifiOff,
-  Loader2,
-  Lock,
-  ShieldCheck,
-  ShieldAlert,
-} from "lucide-react";
+import { Send, LogOut, Wifi, WifiOff, Loader2, Lock } from "lucide-react";
 import type { ChatMessage, RtcStatus } from "@p2p-chat/types";
 
 interface PrivateChatProps {
@@ -23,14 +14,8 @@ interface PrivateChatProps {
     ready: boolean;
     /** Both ends proved they hold the same secret. */
     confirmed: boolean;
-    /** The local user compared the safety string and said it matches. */
-    verified: boolean;
-    /** Eight emoji, or null until derived. */
-    safety: string[] | null;
     /** Non-null when the handshake or confirmation failed. */
     error: string | null;
-    onVerify: () => void;
-    onReject: () => void;
   };
 }
 
@@ -52,7 +37,6 @@ export function PrivateChat({
   e2ee,
 }: PrivateChatProps) {
   const [draft, setDraft] = useState("");
-  const [showSafety, setShowSafety] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to bottom when new messages arrive
@@ -72,11 +56,13 @@ export function PrivateChat({
   };
 
   /**
-   * Sending is gated on all three: a live channel, a cryptographically
-   * confirmed session, and the humans having compared the safety string.
+   * Sending is gated on a live channel and a cryptographically confirmed
+   * session. There is no out-of-band verification step: two strangers have no
+   * channel other than this chat, so comparing a code inside it would prove
+   * nothing against someone reading the chat.
    */
   const encrypted = e2ee.ready && e2ee.confirmed && !e2ee.error;
-  const canSend = rtcStatus === "connected" && encrypted && e2ee.verified;
+  const canSend = rtcStatus === "connected" && encrypted;
 
   const encryptionLabel = e2ee.error
     ? "encryption unavailable"
@@ -84,12 +70,7 @@ export function PrivateChat({
       ? "securing channel…"
       : !e2ee.confirmed
         ? "confirming keys…"
-        : !e2ee.verified
-          ? "verify the safety code"
-          : "end-to-end encrypted";
-
-  const showPanel =
-    showSafety || !!e2ee.error || (e2ee.ready && !e2ee.verified);
+        : "end-to-end encrypted";
 
   const placeholder = e2ee.error
     ? "encryption unavailable"
@@ -99,9 +80,7 @@ export function PrivateChat({
         ? "securing channel…"
         : !e2ee.confirmed
           ? "confirming keys…"
-          : !e2ee.verified
-            ? "verify the safety code to unlock…"
-            : "say something…";
+          : "say something…";
 
   const statusConfig: Record<
     RtcStatus,
@@ -164,93 +143,20 @@ export function PrivateChat({
           </div>
         </header>
 
-        {/* ── Encryption strip ── */}
-        <button
-          type="button"
-          onClick={() => setShowSafety((open) => !open)}
-          className="flex w-full items-center justify-between gap-2 border-b-2 border-ink bg-cream px-4 py-2 text-left"
+        {/* ── Encryption status ── */}
+        <div
+          className={`flex items-center gap-2 border-b-2 border-ink px-4 py-2 font-mono text-[9px] font-bold tracking-[0.14em] uppercase ${
+            e2ee.error ? "bg-coral/30 text-ink" : "bg-cream text-ink/60"
+          }`}
         >
-          <span className="flex items-center gap-2 font-mono text-[9px] font-bold tracking-[0.14em] uppercase text-ink/60">
-            {e2ee.error ? (
-              <ShieldAlert className="h-3 w-3" />
-            ) : encrypted && e2ee.verified ? (
-              <ShieldCheck className="h-3 w-3" />
-            ) : (
-              <Lock className="h-3 w-3" />
-            )}
-            {encryptionLabel}
-          </span>
-          <span className="text-base leading-none tracking-[0.08em]">
-            {e2ee.safety ? e2ee.safety.join("") : ""}
-          </span>
-        </button>
+          <Lock className="h-3 w-3 shrink-0" />
+          <span>{encryptionLabel}</span>
+        </div>
 
-        {showPanel && (
-          <div
-            className={`border-b-2 border-ink px-4 py-3 text-[12px] leading-relaxed font-medium ${
-              e2ee.error ? "bg-coral/30 text-ink" : "bg-mustard/40 text-ink/80"
-            }`}
-          >
-            {e2ee.error ? (
-              <p className="flex items-start gap-2">
-                <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
-                <span>{e2ee.error}</span>
-              </p>
-            ) : e2ee.ready && e2ee.safety && !e2ee.verified ? (
-              <div className="space-y-3">
-                <p className="font-mono text-[9px] font-bold tracking-[0.14em] uppercase text-ink/60">
-                  compare these with your peer
-                </p>
-
-                <p
-                  className="text-center text-3xl leading-none tracking-[0.12em] select-all"
-                  aria-label={e2ee.safety.join(" ")}
-                >
-                  {e2ee.safety.join("")}
-                </p>
-
-                <p>
-                  Read them aloud — or type them in the room — and check that
-                  you both see the same eight, in the same order. If they
-                  differ, someone is sitting between you.
-                </p>
-
-                <div className="flex gap-2 pt-0.5">
-                  <button
-                    type="button"
-                    onClick={e2ee.onVerify}
-                    className="sticker-btn flex-1 bg-teal px-3 py-2 text-[11px] text-ink"
-                  >
-                    <ShieldCheck className="h-3.5 w-3.5" />
-                    they match
-                  </button>
-                  <button
-                    type="button"
-                    onClick={e2ee.onReject}
-                    className="sticker-btn flex-1 bg-coral px-3 py-2 text-[11px] text-ink"
-                  >
-                    <ShieldAlert className="h-3.5 w-3.5" />
-                    they differ
-                  </button>
-                </div>
-              </div>
-            ) : e2ee.safety ? (
-              <>
-                Read these eight with{" "}
-                <span className="font-mono font-bold">
-                  {peerId.slice(0, 8)}
-                </span>{" "}
-                — on a call, or in the room. You must both see the same eight,
-                in the same order. If they differ, someone is sitting between
-                you; leave the chat.
-              </>
-            ) : (
-              <>
-                Keys are being exchanged. Messages cannot be sent until the
-                safety code is confirmed, and are never sent unencrypted.
-              </>
-            )}
-          </div>
+        {e2ee.error && (
+          <p className="border-b-2 border-ink bg-coral/20 px-4 py-2 text-[11px] leading-relaxed font-medium text-ink/80">
+            {e2ee.error}
+          </p>
         )}
 
         {/* ── Messages ── */}

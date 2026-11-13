@@ -15,17 +15,20 @@
  * sessions — one with each peer — and read everything while both sides
  * believe they are talking directly to each other.
  *
- * Closing that needs two things, and the second is useless without the first
- * (and vice versa):
+ * Ephemeral ECDH over the relay closes the *passive* half of that: the relay
+ * only ever sees public keys, and each chat derives a fresh shared secret it
+ * cannot compute. It does not authenticate the peer. A relay that actively
+ * joins two sessions can still sit between them, because these are strangers
+ * and there is no out-of-band channel over which to compare keys.
  *
- *   1. A key agreement the relay cannot substitute — ephemeral ECDH, with the
- *      public keys exchanged over the relay but never trusted as identities.
- *   2. A way for the two humans to check that the keys they ended up with are
- *      the same ones — the short authentication string below.
+ * This is why there is deliberately no safety-code / emoji comparison step.
+ * The only channel two strangers share is the chat itself, so asking them to
+ * read a code to each other inside it is circular: whoever is in the middle
+ * can rewrite the code along with everything else. The app does not pretend
+ * that comparison adds a guarantee it cannot add here.
  *
- * Without step 2 a man in the middle simply relays both public keys, derives
- * both shared secrets, and reads the conversation while every check passes.
- * So the safety string is not decoration; it is the security property.
+ * The guarantee is therefore: message contents are end-to-end encrypted
+ * against the relay and the server, but the peer is not authenticated.
  *
  * ---------------------------------------------------------------------------
  * What is here
@@ -43,77 +46,23 @@
  *   be replayed into a different conversation.
  * - A key confirmation tag (HMAC over both public keys) in each direction, so
  *   a peer that is not holding the same shared secret is detected before the
- *   first message, not after it fails to decrypt.
- * - A 40-bit safety string: eight emoji from a 32-entry alphabet. The earlier
- *   four-of-sixteen version was only 16 bits, which a hostile relay could
- *   grind through until both sides showed the same emoji. 2^40 is out of
- *   reach for an interactive attack.
+ *   first message, not after it fails to decrypt. Agreement, not identity.
  */
 
 const ECDH = { name: "ECDH", namedCurve: "P-256" } as const;
 const AES = { name: "AES-GCM", length: 256 } as const;
 
 /** Bump when the derivation changes; mixed versions must fail loudly. */
-const PROTOCOL = "island-chat/e2ee/v2";
+const PROTOCOL = "island-chat/e2ee/v3";
 
 /**
  * Version advertised on the wire so a peer running different derivation code
  * is rejected with a clear message instead of silently deriving other keys.
  */
-export const E2EE_VERSION = 2;
+export const E2EE_VERSION = 3;
 
 /** How far ahead of the expected counter a message may jump. */
 const MAX_SKIP = 256;
-
-/**
- * Fixed emoji vocabulary for the safety string. Thirty-two entries so each
- * word can be selected by five bits of the digest, and eight words give a
- * 40-bit check. Sixteen entries (four bits) was too small: a relay that
- * controls both substituted keys could grind a colliding pair offline.
- */
-export const SAS_EMOJI = [
-  "🐳",
-  "🦀",
-  "🌴",
-  "🐠",
-  "🪸",
-  "⛵",
-  "🐙",
-  "🦈",
-  "🌊",
-  "🦭",
-  "🐚",
-  "⭐",
-  "🪝",
-  "🧭",
-  "🐡",
-  "🦑",
-  "🐬",
-  "🐢",
-  "🦞",
-  "🐟",
-  "🦐",
-  "🐋",
-  "🏝️",
-  "🌅",
-  "🌙",
-  "☀️",
-  "🌟",
-  "⚓",
-  "🚢",
-  "🐧",
-  "🦦",
-  "🐊",
-] as const;
-
-/** Bits of the digest each emoji consumes. log2(SAS_EMOJI.length). */
-const SAS_BITS = 5;
-
-/** Eight words × five bits = a 40-bit safety string. */
-export const SAS_LENGTH = 8;
-
-/** Eight emoji, shown on both sides, compared by the two people. */
-export type SafetyString = readonly string[];
 
 export interface EncryptedPayload {
   /** Ratchet step. Also selects the nonce. */
@@ -188,16 +137,6 @@ function nonceFor(n: number): Uint8Array {
   return nonce;
 }
 
-/** Reads `count` bits at a bit offset, most-significant bit first. */
-function readBits(bytes: Uint8Array, offset: number, count: number): number {
-  let value = 0;
-  for (let i = 0; i < count; i += 1) {
-    const bit = (bytes[(offset + i) >> 3] >> (7 - ((offset + i) & 7))) & 1;
-    value = (value << 1) | bit;
-  }
-  return value;
-}
-
 /**
  * Compares two byte arrays without an early exit.
  *
@@ -216,8 +155,9 @@ function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
  * One side of one chat's encryption.
  *
  * Lifecycle: `init()` to publish a public key, `derive(peerKey)` once the
- * peer's arrives, then `encrypt` / `decrypt` per message. Keys are ephemeral
- * and this object is discarded when the chat ends.
+ * peer's arrives, `confirmationTag()` / `verifyConfirmation()` to prove both
+ * sides agree, then `encrypt` / `decrypt` per message. Keys are ephemeral and
+ * this object is discarded when the chat ends.
  */
 export class ChatCipher {
   private privateKey: CryptoKey | null = null;
@@ -240,10 +180,9 @@ export class ChatCipher {
 
   /** Keyed HMAC used to prove both sides derived the same secret. */
   private confirmKey: CryptoKey | null = null;
-  /** The exact bytes the safety string and confirmation are bound to. */
+  /** The exact bytes the confirmation is bound to. */
   private transcript: string | null = null;
 
-  private safety: SafetyString | null = null;
   private confirmedState = false;
   private failedState = false;
 
@@ -294,11 +233,6 @@ export class ChatCipher {
   /** True if confirmation failed; this cipher must never be used again. */
   get failed(): boolean {
     return this.failedState;
-  }
-
-  /** The safety string, or null until `derive` has run. */
-  get safetyString(): SafetyString | null {
-    return this.safety;
   }
 
   /**
@@ -364,23 +298,17 @@ export class ChatCipher {
       ["sign"],
     );
 
-    // Safety string: bind both public keys *in sorted order*, so each side
-    // computes the same value regardless of who sent first. A relay that
-    // swaps either key produces a different set of emoji on each side.
+    // Bind both public keys *in sorted order*, so each side computes the same
+    // transcript regardless of who sent first. This is what the confirmation
+    // HMAC covers.
     const keys = [this.publicKeyB64, peerPublicKeyB64].sort().join("|");
-    this.transcript = `${PROTOCOL}/sas|${this.roomId}|${keys}`;
-
-    const digest = await sha256(utf8(this.transcript));
-    this.safety = Array.from(
-      { length: SAS_LENGTH },
-      (_, i) => SAS_EMOJI[readBits(digest, i * SAS_BITS, SAS_BITS)],
-    );
+    this.transcript = `${PROTOCOL}/transcript|${this.roomId}|${keys}`;
   }
 
   /**
-   * This side's confirmation tag: an HMAC over the same transcript the safety
-   * string covers. The peer verifies it with the key derived from the shared
-   * secret, so a relay that substituted keys cannot produce a matching tag.
+   * This side's confirmation tag: an HMAC over the key-exchange transcript.
+   * The peer verifies it with the key derived from the shared secret, so a
+   * peer that did not derive the same secret cannot produce a matching tag.
    */
   async confirmationTag(): Promise<string> {
     if (!this.confirmKey || !this.transcript) {

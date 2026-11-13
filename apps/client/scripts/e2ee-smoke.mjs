@@ -28,32 +28,22 @@ function check(name, condition) {
 }
 
 async function main() {
-  const { ChatCipher, DecryptionError, SAS_EMOJI } = await import(moduleUrl);
+  const { ChatCipher, DecryptionError } = await import(moduleUrl);
 
   const roomId = "aaa-bbb";
 
-  // ── Both sides derive the same keys and the same safety string ─────────
+  // ── Both sides derive the same keys ───────────────────────────────────
   const alice = new ChatCipher(roomId, "initiator");
   const bob = new ChatCipher(roomId, "responder");
   const aliceKey = await alice.init();
   const bobKey = await bob.init();
 
   check("public keys are distinct", aliceKey !== bobKey);
-  check("no safety string before deriving", alice.safetyString === null);
 
   await alice.derive(bobKey);
   await bob.derive(aliceKey);
 
   check("both sides are ready", alice.ready && bob.ready);
-  check(
-    "safety strings match",
-    alice.safetyString.join("") === bob.safetyString.join(""),
-  );
-  check("safety string is eight emoji", alice.safetyString.length === 8);
-  check(
-    "every emoji comes from the vocabulary",
-    alice.safetyString.every((word) => SAS_EMOJI.includes(word)),
-  );
 
   // ── Key confirmation ─────────────────────────────────────────────────
   const aliceTag = await alice.confirmationTag();
@@ -113,10 +103,12 @@ async function main() {
   }
   check("replayed message is rejected", replayRejected);
 
-  // ── A relay in the middle is detectable ────────────────────────────────
-  // Mallory terminates two sessions. Each peer completes a handshake and
-  // everything "works" — but the safety strings differ, which is the whole
-  // point of showing them.
+  // ── A relay in the middle is not detectable from the crypto alone ─────
+  // Mallory terminates two sessions. Both peers complete a handshake and
+  // everything "works": without an out-of-band channel there is no way to
+  // authenticate the peer. This is documented, not accidental — the app
+  // removes the safety-code step because comparing it inside the chat is
+  // circular.
   const malloryForAlice = new ChatCipher(roomId, "responder");
   const malloryForBob = new ChatCipher(roomId, "initiator");
   const m1 = await malloryForAlice.init();
@@ -132,12 +124,11 @@ async function main() {
   await bob2.derive(m2);
 
   check(
-    "MITM handshake succeeds (the attack is not blocked by crypto alone)",
-    alice2.ready && bob2.ready,
-  );
-  check(
-    "MITM safety strings differ, so comparison catches it",
-    alice2.safetyString.join("") !== bob2.safetyString.join(""),
+    "MITM handshake completes: the crypto does not authenticate the peer",
+    alice2.ready &&
+      bob2.ready &&
+      malloryForAlice.ready &&
+      malloryForBob.ready,
   );
 
   // Key confirmation is not a MITM defence (a relay holds a valid, matching

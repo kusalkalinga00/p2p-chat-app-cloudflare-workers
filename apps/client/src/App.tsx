@@ -47,12 +47,8 @@ function App() {
   const [e2eeReady, setE2eeReady] = useState(false);
   /** Both ends proved they derived the same secret (HMAC confirmation). */
   const [e2eeConfirmed, setE2eeConfirmed] = useState(false);
-  /** The local user compared the safety string and said it matches. */
-  const [e2eeVerified, setE2eeVerified] = useState(false);
   /** Set when the handshake or confirmation fails; blocks the composer. */
   const [e2eeError, setE2eeError] = useState<string | null>(null);
-  /** Eight emoji both sides must see identically; null until derived. */
-  const [safetyString, setSafetyString] = useState<string[] | null>(null);
   const [userChangeMessage, setUserChangeMessage] = useState<string | null>(
     null,
   );
@@ -84,11 +80,6 @@ function App() {
 
   /** Per-chat end-to-end encryption state; discarded when the chat ends. */
   const cipherRef = useRef<ChatCipher | null>(null);
-  /**
-   * Human verification, mirrored in a ref so the send path (a stable callback)
-   * reads the current value rather than the one captured at render time.
-   */
-  const verifiedRef = useRef(false);
 
   const shouldReconnectRef = useRef(true);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -418,10 +409,7 @@ function App() {
       setView("chat");
       setE2eeReady(false);
       setE2eeConfirmed(false);
-      setE2eeVerified(false);
       setE2eeError(null);
-      verifiedRef.current = false;
-      setSafetyString(null);
 
       // Start the E2EE handshake alongside the WebRTC one. The role decides
       // which of the two derived chains each side sends on, so the two ends
@@ -467,10 +455,7 @@ function App() {
     cipherRef.current = null;
     setE2eeReady(false);
     setE2eeConfirmed(false);
-    setE2eeVerified(false);
     setE2eeError(null);
-    verifiedRef.current = false;
-    setSafetyString(null);
     setChatTarget(null);
     setMessages([]);
     setView("world");
@@ -479,18 +464,6 @@ function App() {
     // available again and nobody is left talking to a closed channel.
     wsSend({ type: "chat-leave" });
   }, [cleanupRtc, wsSend]);
-
-  /** The user compared the safety string and both sides showed the same. */
-  const confirmSafety = useCallback(() => {
-    verifiedRef.current = true;
-    setE2eeVerified(true);
-  }, []);
-
-  /** The user says the safety strings differ: treat it as an active attack. */
-  const rejectSafety = useCallback(() => {
-    setNotice("Safety codes did not match — the chat was closed.");
-    leaveChat();
-  }, [leaveChat, setNotice]);
 
   // ────────────────────────────────────────────────────────────────
   // WebSocket message handler
@@ -590,9 +563,6 @@ function App() {
               // derive() waits for it rather than dropping the peer's key.
               await cipher.derive(data.payload.publicKey);
               setE2eeReady(cipher.ready);
-              setSafetyString(
-                cipher.safetyString ? [...cipher.safetyString] : null,
-              );
 
               const tag = await cipher.confirmationTag();
               wsSend({
@@ -616,7 +586,7 @@ function App() {
               setE2eeConfirmed(cipher.confirmed);
             } catch (err) {
               // The peer could not prove it holds the same shared secret.
-              // That is what a relay sitting in the middle looks like, so the
+              // That means the two ends disagree about the handshake, so the
               // session is torn down rather than left half-trusted.
               console.error("[e2ee] key confirmation failed:", err);
               setNotice("Encryption check failed — the chat was closed.");
@@ -831,14 +801,13 @@ function App() {
   const sendChatMessage = useCallback((text: string) => {
     const dc = dcRef.current;
     const cipher = cipherRef.current;
-    // No plaintext fallback: the channel, the keys, the cryptographic
-    // confirmation and the human verification must all be in place.
+    // No plaintext fallback: the channel, the keys and the cryptographic
+    // confirmation must all be in place.
     if (
       !dc ||
       dc.readyState !== "open" ||
       !cipher?.ready ||
-      !cipher.confirmed ||
-      !verifiedRef.current
+      !cipher.confirmed
     ) {
       return;
     }
@@ -1003,11 +972,7 @@ function App() {
           e2ee={{
             ready: e2eeReady,
             confirmed: e2eeConfirmed,
-            verified: e2eeVerified,
-            safety: safetyString,
             error: e2eeError,
-            onVerify: confirmSafety,
-            onReject: rejectSafety,
           }}
         />
       )}
