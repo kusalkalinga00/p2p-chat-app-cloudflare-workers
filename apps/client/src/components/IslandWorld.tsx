@@ -338,13 +338,13 @@ function Ocean() {
   // vertices are jittered once so the facets are irregular, like hand-cut
   // tiles; the border ring stays put so the plane still covers the view.
   const geometry = useMemo(() => {
-    const geo = new THREE.PlaneGeometry(240, 240, 60, 60);
+    const geo = new THREE.PlaneGeometry(400, 400, 66, 66);
     const pos = geo.attributes.position;
     const rnd = mulberry32(4242);
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i);
       const y = pos.getY(i);
-      if (Math.abs(x) < 114 && Math.abs(y) < 114) {
+      if (Math.abs(x) < 190 && Math.abs(y) < 190) {
         pos.setX(i, x + (rnd() - 0.5) * 2.6);
         pos.setY(i, y + (rnd() - 0.5) * 2.6);
       }
@@ -697,12 +697,14 @@ function DayCycle() {
         shadow-camera-far={90}
       />
 
-      <fog attach="fog" args={[CREAM, 36, 95]} />
+      <fog attach="fog" args={[CREAM, 70, 200]} />
 
       {/* Sky dome. Back-faced and huge, with depth writes off so it always
           sits behind the scene but never fights the depth buffer. */}
       <mesh ref={skyRef} frustumCulled={false}>
-        <sphereGeometry args={[120, 32, 16]} />
+        {/* Radius 400: everything the scene draws has to stay inside it, or a
+            far island beyond the dome would be depth-tested away. */}
+        <sphereGeometry args={[400, 32, 16]} />
         <shaderMaterial
           uniforms={SKY_UNIFORMS}
           vertexShader={SKY_VERTEX}
@@ -992,19 +994,20 @@ function Island({ config }: { config: IslandConfig }) {
         : []),
     ];
 
-    const place = (minFrac: number) => {
+    const place = (minFrac: number, maxFrac = minFrac + 0.24) => {
       let x = 0;
       let z = 0;
       // Resample rather than nudge: a palm dropped on the lighthouse looks
       // worse than one fewer palm.
       for (let attempt = 0; attempt < 16; attempt++) {
         const angle = rnd() * Math.PI * 2;
+        const frac = minFrac + rnd() * (maxFrac - minFrac);
         const rr = Math.max(
           clearRadius,
           radius *
-            minFrac *
+            frac *
             shoreFactor(geometry.shoreline, angle) *
-            (0.75 + rnd() * 0.25),
+            (0.82 + rnd() * 0.18),
         );
         x = Math.cos(angle) * rr;
         z = Math.sin(angle) * rr;
@@ -1015,16 +1018,16 @@ function Island({ config }: { config: IslandConfig }) {
 
     return {
       palms: Array.from({ length: palms }, (_, i) => ({
-        position: place(0.42),
+        position: place(0.45, 0.82),
         scale: 1.0 + rnd() * 0.45,
         seed: seed + i * 31,
       })),
       rocks: Array.from({ length: rocks }, () => ({
-        position: place(0.55),
+        position: place(0.5, 0.9),
         scale: 0.7 + rnd() * 0.8,
       })),
       bushes: Array.from({ length: bushes }, () => ({
-        position: place(0.6),
+        position: place(0.4, 0.88),
         scale: 0.7 + rnd() * 0.5,
       })),
     };
@@ -1410,12 +1413,13 @@ function House({
 /**
  * Stone plaza under the avatars. A squat cylinder rather than a flat disc, so
  * the edge has a visible lip and the slightly domed sand underneath cannot
- * poke through the middle.
+ * poke through the middle. Sized to the island rather than to one character:
+ * at 3.2 it disappeared on the enlarged landmass.
  */
 function Plaza({ y }: { y: number }) {
   return (
     <mesh position={[0, y - 0.08, 0]} castShadow receiveShadow>
-      <cylinderGeometry args={[3.2, 3.38, 0.16, 24]} />
+      <cylinderGeometry args={[6.2, 6.5, 0.16, 32]} />
       <meshToonMaterial color={STONE} gradientMap={TOON_RAMP} flatShading />
       <InkOutline />
     </mesh>
@@ -1788,10 +1792,10 @@ function WorldLabels({ items }: { items: LabelItem[] }) {
 // Sea spray
 // ---------------------------------------------------------------------------
 
-const SPRAY = Array.from({ length: 60 }, () => ({
-  x: (Math.random() - 0.5) * 64,
+const SPRAY = Array.from({ length: 80 }, () => ({
+  x: (Math.random() - 0.5) * 96,
   y: Math.random() * 4 + 0.4,
-  z: (Math.random() - 0.5) * 64,
+  z: (Math.random() - 0.5) * 96,
   speed: 0.3 + Math.random() * 0.5,
   phase: Math.random() * Math.PI * 2,
 }));
@@ -1829,22 +1833,24 @@ function Spray({ count = 40 }: { count?: number }) {
 // The archipelago
 // ---------------------------------------------------------------------------
 //
-// Generated rather than hand-listed: one large island with a seeded ring of
-// smaller ones around it, so no two reloads lay out identical shapes.
+// One big island, and a handful of small ones far out on the horizon. The old
+// near ring is gone: with the main island this wide it would have been beach.
 
 const MAIN_ISLAND: IslandConfig = {
   x: 0,
   z: 0,
-  radius: 8.2,
-  topY: WATER_Y + 1.9,
+  // Twice the old radius: the marked-out boundary in the reference sketch.
+  radius: 16.5,
+  topY: WATER_Y + 2.05,
   seed: 1011,
-  segments: 22,
-  // The plaza is ~3.4 units across and the scatter starts outside it.
-  clearRadius: 4.2,
+  // More segments keep the long coastline from reading as a polygon.
+  segments: 40,
+  // The plaza is ~12 units across and the scatter starts outside it.
+  clearRadius: 7.2,
   plaza: true,
-  // Back-left, away from the default camera, so it frames the island without
-  // standing between the camera and the avatars.
-  lighthouseAt: [-6.1, -3.8],
+  // Back-left, out toward the new shoreline, so it still frames the island.
+  // 0.8 of the rim at this angle (~13.5), so it stays on the cap.
+  lighthouseAt: [-9.2, -5.7],
   // Out the front-right, away from the lighthouse.
   pierAt: 0.49,
   houses: [
@@ -1854,29 +1860,30 @@ const MAIN_ISLAND: IslandConfig = {
     { angle: 4.36, dist: 0.68, scale: 1.3, roof: CORAL },
     { angle: 5.5, dist: 0.63, scale: 1.2, roof: MUSTARD },
   ],
-  palms: 9,
-  rocks: 5,
-  bushes: 8,
+  // The land is four times the old area; fill it rather than leaving bare
+  // sand between the village and the water.
+  palms: 20,
+  rocks: 12,
+  bushes: 18,
 };
 
 const ISLANDS: IslandConfig[] = (() => {
   const rnd = mulberry32(20261107);
   const list: IslandConfig[] = [];
 
-  for (let i = 0; i < 12; i++) {
-    const angle = (i / 12) * Math.PI * 2 + rnd() * 0.55;
-    // Pushed out from the old ring: the main island is now 8.2 units across
-    // and its shoreline reaches past 10.
-    const distance = 21.5 + rnd() * 9;
-    const radius = 1.5 + rnd() * 1.7;
+  for (let i = 0; i < 5; i++) {
+    const angle = (i / 5) * Math.PI * 2 + rnd() * 0.5;
+    // Far out on the horizon, well beyond the boat lane.
+    const distance = 85 + rnd() * 35;
+    const radius = 2.5 + rnd() * 2.0;
     list.push({
       x: Math.cos(angle) * distance,
       z: Math.sin(angle) * distance,
       radius,
-      topY: WATER_Y + 0.75 + rnd() * 0.6,
+      topY: WATER_Y + 0.8 + rnd() * 0.7,
       seed: 2000 + i * 137,
-      segments: 12 + Math.floor(rnd() * 5),
-      palms: rnd() > 0.4 ? 1 + Math.floor(rnd() * 2) : 0,
+      segments: 14 + Math.floor(rnd() * 5),
+      palms: 1 + Math.floor(rnd() * 2),
       rocks: Math.floor(rnd() * 2),
       bushes: Math.floor(rnd() * 3),
     });
@@ -1890,7 +1897,8 @@ const BUOYS = (() => {
   const rnd = mulberry32(99173);
   return Array.from({ length: 9 }, (_, i) => {
     const angle = (i / 9) * Math.PI * 2 + 0.95 + rnd() * 0.28;
-    const distance = 11.8 + rnd() * 0.8;
+    // Just outside the new shoreline, which reaches about 22 units.
+    const distance = 23.6 + rnd() * 1.4;
     return {
       position: [
         Math.cos(angle) * distance,
@@ -1903,46 +1911,46 @@ const BUOYS = (() => {
 })();
 
 /**
- * Boats on slow circular drifts between the main island and the outer islets.
+ * Boats on slow circular drifts between the main island and the horizon.
  * Different radii and speeds mean they never fall into formation; a negative
  * direction sends one the other way round.
  */
 const BOATS = [
   {
-    radius: 14.8,
+    radius: 30.5,
     speed: 0.045,
     phase: 0.4,
     direction: 1,
     hull: CORAL,
     sail: CREAM,
-    scale: 1,
+    scale: 1.4,
   },
   {
-    radius: 15.4,
+    radius: 32.5,
     speed: 0.036,
     phase: 2.6,
     direction: -1,
     hull: TEAL,
     sail: MUSTARD,
-    scale: 1.15,
+    scale: 1.6,
   },
   {
-    radius: 16.0,
+    radius: 34.5,
     speed: 0.06,
     phase: 4.4,
     direction: 1,
     hull: MUSTARD,
     sail: CORAL,
-    scale: 0.9,
+    scale: 1.3,
   },
   {
-    radius: 15.1,
+    radius: 36.5,
     speed: 0.03,
     phase: 5.6,
     direction: -1,
     hull: CREAM,
     sail: TEAL,
-    scale: 1.05,
+    scale: 1.5,
   },
 ] as const;
 
@@ -1975,7 +1983,7 @@ export function IslandWorld({
       const ring = Math.floor(index / perRing);
       const indexInRing = index % perRing;
       const angle = (indexInRing / perRing) * Math.PI * 2 + ring * 0.35;
-      const radius = 2.4 + ring * 0.95;
+      const radius = 4.8 + ring * 1.9;
 
       return [
         MAIN_ISLAND.x + Math.cos(angle) * radius,
@@ -2007,7 +2015,7 @@ export function IslandWorld({
     <div className="relative h-screen w-full">
       <Canvas
         shadows="percentage"
-        camera={{ position: [16, 13, 16], fov: 55 }}
+        camera={{ position: [32, 26, 32], fov: 55 }}
         style={{
           // Fallback only: the sky dome covers the canvas from the first frame.
           // Kept close to the dawn horizon so there is no flash on mount.
@@ -2020,8 +2028,8 @@ export function IslandWorld({
           enablePan
           enableZoom
           enableRotate
-          minDistance={9}
-          maxDistance={46}
+          minDistance={28}
+          maxDistance={70}
           maxPolarAngle={Math.PI / 2.1}
           target={[0, 0, 0]}
         />
@@ -2058,7 +2066,7 @@ export function IslandWorld({
           <Boat key={`boat-${i}`} {...boat} />
         ))}
 
-        <Spray count={60} />
+        <Spray count={80} />
 
         <WorldLabels items={labelItems} />
       </Canvas>
