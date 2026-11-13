@@ -338,13 +338,13 @@ function Ocean() {
   // vertices are jittered once so the facets are irregular, like hand-cut
   // tiles; the border ring stays put so the plane still covers the view.
   const geometry = useMemo(() => {
-    const geo = new THREE.PlaneGeometry(150, 150, 52, 52);
+    const geo = new THREE.PlaneGeometry(240, 240, 60, 60);
     const pos = geo.attributes.position;
     const rnd = mulberry32(4242);
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i);
       const y = pos.getY(i);
-      if (Math.abs(x) < 70 && Math.abs(y) < 70) {
+      if (Math.abs(x) < 114 && Math.abs(y) < 114) {
         pos.setX(i, x + (rnd() - 0.5) * 2.6);
         pos.setY(i, y + (rnd() - 0.5) * 2.6);
       }
@@ -440,6 +440,306 @@ function Ocean() {
         }}
       />
     </mesh>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sky and sun – a slow day cycle driving colour, fog and light
+// ---------------------------------------------------------------------------
+
+/** Seconds for one full day: sunrise, noon, sunset, night. */
+const DAY_SECONDS = 120;
+
+const SKY_VERTEX = /* glsl */ `
+  varying vec3 vDir;
+  void main() {
+    vDir = normalize(position);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const SKY_FRAGMENT = /* glsl */ `
+  uniform vec3 uTop;
+  uniform vec3 uBottom;
+  uniform vec3 uSunColor;
+  uniform vec3 uSunDir;
+  uniform float uGlow;
+  varying vec3 vDir;
+
+  void main() {
+    vec3 dir = normalize(vDir);
+    // Horizon to zenith. The lower band is what the sea meets, so it stays
+    // warm at dawn and dusk while the top of the sky has already gone blue.
+    vec3 col = mix(uBottom, uTop, smoothstep(-0.03, 0.55, dir.y));
+
+    // A soft bloom around the sun, strongest when it is low.
+    float d = max(dot(dir, normalize(uSunDir)), 0.0);
+    col += uSunColor * pow(d, 14.0) * uGlow;
+
+    gl_FragColor = vec4(col, 1.0);
+  }
+`;
+
+/** Shared with the sky material; rewritten once per frame by <DayCycle>. */
+const SKY_UNIFORMS = {
+  uTop: { value: new THREE.Color(CREAM) },
+  uBottom: { value: new THREE.Color("#f6ead6") },
+  uSunColor: { value: new THREE.Color(MUSTARD) },
+  uSunDir: { value: new THREE.Vector3(0, 0.4, 1).normalize() },
+  uGlow: { value: 0.8 },
+};
+
+interface SkyKey {
+  /** Sun elevation: -1 at midnight, 0 at the horizon, 1 at noon. */
+  at: number;
+  top: THREE.Color;
+  bottom: THREE.Color;
+  fog: THREE.Color;
+  tint: THREE.Color;
+  ambient: number;
+  sun: number;
+  glow: number;
+}
+
+/**
+ * Four moments of the day. Everything between them is interpolated, so there
+ * is no hard switch at sunrise or sunset. Night keeps a decent ambient floor:
+ * it has to stay possible to see the other avatars.
+ */
+const SKY_KEYS: SkyKey[] = [
+  {
+    at: -1,
+    top: new THREE.Color("#101c36"),
+    bottom: new THREE.Color("#25395c"),
+    fog: new THREE.Color("#25395c"),
+    tint: new THREE.Color("#9db9ff"),
+    ambient: 0.6,
+    sun: 0.1,
+    glow: 0.18,
+  },
+  {
+    at: -0.05,
+    top: new THREE.Color("#2c3f68"),
+    bottom: new THREE.Color("#8a6172"),
+    fog: new THREE.Color("#6a5468"),
+    tint: new THREE.Color("#ffb08a"),
+    ambient: 0.52,
+    sun: 0.2,
+    glow: 0.85,
+  },
+  {
+    at: 0.07,
+    top: new THREE.Color("#7fa9cc"),
+    bottom: new THREE.Color("#ffb37d"),
+    fog: new THREE.Color("#f3c6a4"),
+    tint: new THREE.Color("#ff9a5a"),
+    ambient: 0.56,
+    sun: 0.65,
+    glow: 1.35,
+  },
+  {
+    at: 0.36,
+    top: new THREE.Color("#79c4e8"),
+    bottom: new THREE.Color("#ddf2ec"),
+    fog: new THREE.Color("#e7f5ee"),
+    tint: new THREE.Color("#fff2cf"),
+    ambient: 0.7,
+    sun: 0.95,
+    glow: 0.7,
+  },
+  {
+    at: 1,
+    top: new THREE.Color("#68b6e4"),
+    bottom: new THREE.Color("#e4f7f4"),
+    fog: new THREE.Color("#eef9f4"),
+    tint: new THREE.Color("#fff6de"),
+    ambient: 0.74,
+    sun: 1,
+    glow: 0.55,
+  },
+];
+
+/** Reused output of `sampleSky`, so the frame loop allocates nothing. */
+const SKY_STATE = {
+  top: new THREE.Color(),
+  bottom: new THREE.Color(),
+  fog: new THREE.Color(),
+  tint: new THREE.Color(),
+  ambient: 0,
+  sun: 0,
+  glow: 0,
+};
+
+function sampleSky(elevation: number) {
+  let i = 0;
+  while (i < SKY_KEYS.length - 2 && elevation > SKY_KEYS[i + 1].at) i += 1;
+
+  const a = SKY_KEYS[i];
+  const b = SKY_KEYS[i + 1];
+  const span = b.at - a.at;
+  const raw = span === 0 ? 0 : (elevation - a.at) / span;
+  const t = THREE.MathUtils.smoothstep(raw, 0, 1);
+
+  SKY_STATE.top.copy(a.top).lerp(b.top, t);
+  SKY_STATE.bottom.copy(a.bottom).lerp(b.bottom, t);
+  SKY_STATE.fog.copy(a.fog).lerp(b.fog, t);
+  SKY_STATE.tint.copy(a.tint).lerp(b.tint, t);
+  SKY_STATE.ambient = THREE.MathUtils.lerp(a.ambient, b.ambient, t);
+  SKY_STATE.sun = THREE.MathUtils.lerp(a.sun, b.sun, t);
+  SKY_STATE.glow = THREE.MathUtils.lerp(a.glow, b.glow, t);
+
+  return SKY_STATE;
+}
+
+const SUN_DIR = new THREE.Vector3();
+const WHITE = new THREE.Color("#ffffff");
+
+/**
+ * Owns the sky dome, the sun, and every light in the scene.
+ *
+ * The cycle starts at sunrise, so opening the app shows the sun coming up and
+ * then a full day passing. Time is the clock's elapsed seconds rather than a
+ * React state value: this updates every frame and must not trigger renders.
+ */
+function DayCycle() {
+  const { scene, camera } = useThree();
+  const skyRef = useRef<THREE.Mesh>(null);
+  const ambientRef = useRef<THREE.AmbientLight>(null);
+  const sunLightRef = useRef<THREE.DirectionalLight>(null);
+  const lampRef = useRef<THREE.PointLight>(null);
+  const sunGroupRef = useRef<THREE.Group>(null);
+  const sunCoreRef = useRef<THREE.MeshBasicMaterial>(null);
+  const sunHaloRef = useRef<THREE.MeshBasicMaterial>(null);
+
+  useFrame(({ clock }) => {
+    // 0 = sunrise, π/2 = noon, π = sunset, 3π/2 = midnight.
+    const theta = (clock.elapsedTime / DAY_SECONDS) * Math.PI * 2;
+    const elevation = Math.sin(theta);
+
+    SUN_DIR.set(Math.cos(theta) * 0.86, elevation, 0.38).normalize();
+    const sky = sampleSky(elevation);
+
+    SKY_UNIFORMS.uTop.value.copy(sky.top);
+    SKY_UNIFORMS.uBottom.value.copy(sky.bottom);
+    SKY_UNIFORMS.uSunColor.value.copy(sky.tint);
+    SKY_UNIFORMS.uSunDir.value.copy(SUN_DIR);
+    SKY_UNIFORMS.uGlow.value = sky.glow;
+
+    if (scene.fog) scene.fog.color.copy(sky.fog);
+    // Foam is added after lighting in the water shader, so it has to be
+    // tinted by hand or it glows white at midnight.
+    WATER_UNIFORMS.uFoam.value.copy(sky.bottom).lerp(WHITE, 0.55);
+
+    const ambient = ambientRef.current;
+    if (ambient) {
+      ambient.intensity = sky.ambient;
+      ambient.color.copy(sky.bottom).lerp(WHITE, 0.45);
+    }
+
+    const sunLight = sunLightRef.current;
+    if (sunLight) {
+      sunLight.intensity = sky.sun;
+      sunLight.color.copy(sky.tint);
+      // Keep the key light above the horizon, so night shadows do not come
+      // from underneath the island.
+      sunLight.position.set(
+        SUN_DIR.x * 32,
+        Math.max(SUN_DIR.y, 0.12) * 36,
+        SUN_DIR.z * 32,
+      );
+    }
+
+    const sunGroup = sunGroupRef.current;
+    if (sunGroup) {
+      // Positioned relative to the camera, like a sun at infinity: the glow in
+      // the sky shader is directional, so the disc has to sit on the same
+      // direction or the two drift apart as the camera orbits.
+      sunGroup.position.copy(camera.position).addScaledVector(SUN_DIR, 68);
+      sunGroup.visible = elevation > -0.06;
+      sunGroup.lookAt(camera.position);
+    }
+
+    // Keep the sky centred on the camera so the gradient's horizon does not
+    // slide around as the user orbits or zooms.
+    if (skyRef.current) skyRef.current.position.copy(camera.position);
+
+    if (sunCoreRef.current) sunCoreRef.current.color.copy(sky.tint);
+    if (sunHaloRef.current) {
+      sunHaloRef.current.color.copy(sky.tint);
+      sunHaloRef.current.opacity = THREE.MathUtils.clamp(
+        0.16 + elevation * 0.3,
+        0.08,
+        0.4,
+      );
+    }
+
+    // A warm lamp over the plaza, so night is dim rather than unusable.
+    const night = THREE.MathUtils.clamp(-elevation * 2.4, 0, 1);
+    if (lampRef.current) lampRef.current.intensity = night * 1.15;
+  });
+
+  return (
+    <>
+      <ambientLight ref={ambientRef} intensity={0.72} />
+
+      <directionalLight
+        ref={sunLightRef}
+        position={[15, 20, 10]}
+        intensity={0.95}
+        castShadow
+        shadow-mapSize-width={2048}
+        shadow-mapSize-height={2048}
+        shadow-camera-left={-34}
+        shadow-camera-right={34}
+        shadow-camera-top={34}
+        shadow-camera-bottom={-34}
+        shadow-camera-near={0.5}
+        shadow-camera-far={90}
+      />
+
+      <fog attach="fog" args={[CREAM, 36, 95]} />
+
+      {/* Sky dome. Back-faced and huge, with depth writes off so it always
+          sits behind the scene but never fights the depth buffer. */}
+      <mesh ref={skyRef} frustumCulled={false}>
+        <sphereGeometry args={[120, 32, 16]} />
+        <shaderMaterial
+          uniforms={SKY_UNIFORMS}
+          vertexShader={SKY_VERTEX}
+          fragmentShader={SKY_FRAGMENT}
+          side={THREE.BackSide}
+          depthWrite={false}
+        />
+      </mesh>
+
+      {/* Sun: two flat discs that turn to face the camera. */}
+      <group ref={sunGroupRef}>
+        <mesh>
+          <circleGeometry args={[7.4, 32]} />
+          <meshBasicMaterial
+            ref={sunHaloRef}
+            color={MUSTARD}
+            transparent
+            opacity={0.25}
+            depthWrite={false}
+            fog={false}
+          />
+        </mesh>
+        <mesh position={[0, 0, 0.4]}>
+          <circleGeometry args={[3.4, 32]} />
+          <meshBasicMaterial ref={sunCoreRef} color={MUSTARD} fog={false} />
+        </mesh>
+      </group>
+
+      <pointLight
+        ref={lampRef}
+        position={[0, WATER_Y + 3.4, 0]}
+        color={MUSTARD}
+        intensity={0}
+        distance={10}
+        decay={1.6}
+      />
+    </>
   );
 }
 
@@ -614,6 +914,24 @@ interface IslandConfig {
   clearRadius?: number;
   /** Local x/z for a lighthouse, and a radius the scatter avoids around it. */
   lighthouseAt?: [number, number];
+  /** A stone plaza in the middle, where the avatars stand. */
+  plaza?: boolean;
+  /** Cottages, positioned by angle around the island and distance fraction. */
+  houses?: HouseSpec[];
+  /** Angle for a wooden pier reaching into the sea, if this island has one. */
+  pierAt?: number;
+}
+
+interface HouseSpec {
+  /** Angle around the island, in radians. */
+  angle: number;
+  /** Distance from the centre, as a fraction of the island radius. */
+  dist: number;
+  scale?: number;
+  roof?: string;
+  walls?: string;
+  /** Extra yaw on top of the default "face the plaza". */
+  yaw?: number;
 }
 
 function Island({ config }: { config: IslandConfig }) {
@@ -629,6 +947,9 @@ function Island({ config }: { config: IslandConfig }) {
     bushes = 0,
     clearRadius = 0,
     lighthouseAt,
+    plaza = false,
+    houses = [],
+    pierAt,
   } = config;
 
   const geometry = useMemo(
@@ -636,15 +957,47 @@ function Island({ config }: { config: IslandConfig }) {
     [radius, topY, seed, segments],
   );
 
-  // Scatter, kept clear of the avatar ring in the middle of the main island.
+  // Cottages sit in a ring outside the plaza. Position and yaw are derived
+  // from the same shoreline function the mesh uses, so a house can never end
+  // up half over the sand rim.
+  const housePlacements = useMemo(
+    () =>
+      houses.map((house) => {
+        const rr =
+          radius * house.dist * shoreFactor(geometry.shoreline, house.angle);
+        const hx = Math.cos(house.angle) * rr;
+        const hz = Math.sin(house.angle) * rr;
+        return {
+          ...house,
+          x: hx,
+          z: hz,
+          // The door is on +Z: turn it toward the plaza.
+          rotation: Math.atan2(-hx, -hz) + (house.yaw ?? 0),
+        };
+      }),
+    [houses, geometry.shoreline, radius],
+  );
+
+  // Scatter, kept clear of the avatar ring, the buildings, and the lighthouse.
   const scatter = useMemo(() => {
     const rnd = mulberry32(seed * 104729 + 7);
+    const keepOut = [
+      ...housePlacements.map((house) => ({
+        x: house.x,
+        z: house.z,
+        r: 1.5 * (house.scale ?? 1),
+      })),
+      ...(lighthouseAt
+        ? [{ x: lighthouseAt[0], z: lighthouseAt[1], r: 2.8 }]
+        : []),
+    ];
+
     const place = (minFrac: number) => {
       let x = 0;
       let z = 0;
       // Resample rather than nudge: a palm dropped on the lighthouse looks
       // worse than one fewer palm.
-      for (let attempt = 0; attempt < 12; attempt++) {
+      for (let attempt = 0; attempt < 16; attempt++) {
         const angle = rnd() * Math.PI * 2;
         const rr = Math.max(
           clearRadius,
@@ -655,12 +1008,7 @@ function Island({ config }: { config: IslandConfig }) {
         );
         x = Math.cos(angle) * rr;
         z = Math.sin(angle) * rr;
-        if (
-          !lighthouseAt ||
-          Math.hypot(x - lighthouseAt[0], z - lighthouseAt[1]) > 2.8
-        ) {
-          break;
-        }
+        if (!keepOut.some((k) => Math.hypot(x - k.x, z - k.z) < k.r)) break;
       }
       return [x, topY, z] as [number, number, number];
     };
@@ -683,6 +1031,7 @@ function Island({ config }: { config: IslandConfig }) {
   }, [
     clearRadius,
     geometry.shoreline,
+    housePlacements,
     lighthouseAt,
     palms,
     radius,
@@ -716,6 +1065,23 @@ function Island({ config }: { config: IslandConfig }) {
           depthWrite={false}
         />
       </mesh>
+
+      {plaza && <Plaza y={topY + 0.16} />}
+
+      {housePlacements.map((house, i) => (
+        <House
+          key={`house-${i}`}
+          position={[house.x, topY + 0.03, house.z]}
+          rotation={house.rotation}
+          scale={house.scale ?? 1}
+          roof={house.roof}
+          walls={house.walls}
+        />
+      ))}
+
+      {pierAt !== undefined && (
+        <Pier angle={pierAt} radius={radius} shoreline={geometry.shoreline} />
+      )}
 
       {scatter.palms.map((palm, i) => (
         <CoconutPalm
@@ -794,6 +1160,128 @@ function Buoy({
 }
 
 // ---------------------------------------------------------------------------
+// Boats – little hulls drifting on slow circles, bobbing with the swell
+// ---------------------------------------------------------------------------
+
+/**
+ * A pointed hull, extruded from a top-view outline and laid flat. Extruding a
+ * shape is the cheapest way to get a real bow and stern instead of a box; the
+ * ink outline then carries the silhouette.
+ */
+const HULL_GEOMETRY = (() => {
+  const shape = new THREE.Shape();
+  shape.moveTo(-0.72, -0.3);
+  shape.lineTo(0.32, -0.3);
+  shape.quadraticCurveTo(0.9, 0, 0.32, 0.3);
+  shape.lineTo(-0.72, 0.3);
+  shape.closePath();
+
+  const geometry = new THREE.ExtrudeGeometry(shape, {
+    depth: 0.36,
+    bevelEnabled: false,
+    curveSegments: 4,
+  });
+  // The shape lies in XY and extrudes along +Z. Rotate so it lies in XZ:
+  // keel at y = 0, deck at y = 0.36, bow pointing along +X.
+  geometry.rotateX(-Math.PI / 2);
+  return geometry;
+})();
+
+/** A right-triangle sail, normal along +Z, with its luff on the mast. */
+const SAIL_GEOMETRY = (() => {
+  const shape = new THREE.Shape();
+  shape.moveTo(0, 0);
+  shape.lineTo(0, 1.05);
+  shape.lineTo(0.74, 0.08);
+  shape.closePath();
+  return new THREE.ShapeGeometry(shape);
+})();
+
+function Boat({
+  radius,
+  speed,
+  phase,
+  direction = 1,
+  hull = CORAL,
+  sail = CREAM,
+  scale = 1,
+}: {
+  radius: number;
+  speed: number;
+  phase: number;
+  direction?: 1 | -1;
+  hull?: string;
+  sail?: string;
+  scale?: number;
+}) {
+  const ref = useRef<THREE.Group>(null);
+
+  useFrame(({ clock }) => {
+    const group = ref.current;
+    if (!group) return;
+    const t = clock.elapsedTime;
+    const angle = phase + t * speed * direction;
+
+    // Orbit, bob, and lean with the swell.
+    group.position.set(
+      Math.cos(angle) * radius,
+      WATER_Y + 0.34 + Math.sin(t * 0.9 + phase) * 0.08,
+      Math.sin(angle) * radius,
+    );
+
+    // Point the bow along the tangent. The hull's bow is +X; rotating +X by θ
+    // about Y gives (cos θ, 0, -sin θ), so solve for the tangent (-sin, cos).
+    const tx = -Math.sin(angle) * direction;
+    const tz = Math.cos(angle) * direction;
+    group.rotation.y = Math.atan2(-tz, tx);
+    group.rotation.z = Math.sin(t * 0.8 + phase) * 0.06;
+    group.rotation.x = Math.cos(t * 1.05 + phase) * 0.04;
+  });
+
+  return (
+    <group ref={ref} scale={scale}>
+      <mesh geometry={HULL_GEOMETRY} castShadow>
+        <meshToonMaterial color={hull} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+
+      {/* deck */}
+      <mesh position={[0.02, 0.37, 0]} castShadow>
+        <boxGeometry args={[0.92, 0.05, 0.44]} />
+        <meshToonMaterial color={CREAM} gradientMap={TOON_RAMP} flatShading />
+      </mesh>
+
+      {/* mast */}
+      <mesh position={[0.06, 0.94, 0]} castShadow>
+        <cylinderGeometry args={[0.032, 0.045, 1.15, 6]} />
+        <meshToonMaterial color={TRUNK} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+
+      {/* sail */}
+      <mesh geometry={SAIL_GEOMETRY} position={[0.06, 0.48, 0]}>
+        <meshToonMaterial
+          color={sail}
+          gradientMap={TOON_RAMP}
+          side={THREE.DoubleSide}
+        />
+      </mesh>
+
+      {/* pennant */}
+      <mesh position={[0.06, 1.54, 0]}>
+        <planeGeometry args={[0.22, 0.11]} />
+        <meshBasicMaterial
+          color={hull}
+          side={THREE.DoubleSide}
+          transparent
+          opacity={0.95}
+        />
+      </mesh>
+    </group>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Lighthouse – the one landmark on the horizon
 // ---------------------------------------------------------------------------
 
@@ -832,6 +1320,179 @@ function Lighthouse({ position }: { position: [number, number, number] }) {
       <mesh position={[0, 1.98, 0]} castShadow>
         <coneGeometry args={[0.32, 0.3, 10]} />
         <meshToonMaterial color={CORAL} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+    </group>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Village: cottages, a stone plaza, and a pier
+// ---------------------------------------------------------------------------
+
+/**
+ * A cottage in the same pen-and-fill style: box walls, a four-sided pyramid
+ * roof, and flat planes for the door and windows so the front reads at a
+ * distance. The plinth hides the seam where the building meets the sloped
+ * sand.
+ */
+function House({
+  position,
+  rotation,
+  scale = 1,
+  roof = CORAL,
+  walls = CREAM,
+}: {
+  position: [number, number, number];
+  rotation: number;
+  scale?: number;
+  roof?: string;
+  walls?: string;
+}) {
+  return (
+    <group position={position} rotation={[0, rotation, 0]} scale={scale}>
+      {/* plinth */}
+      <mesh position={[0, 0.05, 0]} castShadow receiveShadow>
+        <boxGeometry args={[1.62, 0.2, 1.38]} />
+        <meshToonMaterial
+          color={SAND_MID}
+          gradientMap={TOON_RAMP}
+          flatShading
+        />
+        <InkOutline />
+      </mesh>
+
+      {/* walls */}
+      <mesh position={[0, 0.64, 0]} castShadow receiveShadow>
+        <boxGeometry args={[1.34, 1.0, 1.1]} />
+        <meshToonMaterial color={walls} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+
+      {/* Pyramid roof. A four-sided cone is a square pyramid; rotating it 45°
+          puts its faces over the walls instead of its corners. */}
+      <mesh position={[0, 1.42, 0]} rotation={[0, Math.PI / 4, 0]} castShadow>
+        <coneGeometry args={[1.18, 0.72, 4]} />
+        <meshToonMaterial color={roof} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+
+      {/* door */}
+      <mesh position={[0, 0.42, 0.556]}>
+        <planeGeometry args={[0.34, 0.62]} />
+        <meshToonMaterial color={TRUNK} gradientMap={TOON_RAMP} />
+      </mesh>
+
+      {/* windows: lit from inside, so the village still reads at night. Basic
+          material rather than toon: these are the only emissive-looking
+          surfaces in the scene. */}
+      {[-0.42, 0.42].map((x) => (
+        <mesh key={`window-${x}`} position={[x, 0.8, 0.556]}>
+          <planeGeometry args={[0.26, 0.24]} />
+          <meshBasicMaterial color={MUSTARD} />
+        </mesh>
+      ))}
+      <mesh position={[0.676, 0.8, 0]} rotation={[0, Math.PI / 2, 0]}>
+        <planeGeometry args={[0.3, 0.26]} />
+        <meshBasicMaterial color={MUSTARD} />
+      </mesh>
+
+      {/* chimney */}
+      <mesh position={[0.4, 1.62, -0.22]} castShadow>
+        <boxGeometry args={[0.2, 0.52, 0.2]} />
+        <meshToonMaterial color={STONE} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+    </group>
+  );
+}
+
+/**
+ * Stone plaza under the avatars. A squat cylinder rather than a flat disc, so
+ * the edge has a visible lip and the slightly domed sand underneath cannot
+ * poke through the middle.
+ */
+function Plaza({ y }: { y: number }) {
+  return (
+    <mesh position={[0, y - 0.08, 0]} castShadow receiveShadow>
+      <cylinderGeometry args={[3.2, 3.38, 0.16, 24]} />
+      <meshToonMaterial color={STONE} gradientMap={TOON_RAMP} flatShading />
+      <InkOutline />
+    </mesh>
+  );
+}
+
+/**
+ * A jetty on the waterline: deck on posts, two crates, and a short ramp up the
+ * beach. Positioned in world space so its inner end always meets the shore
+ * regardless of the irregular coastline.
+ */
+function Pier({
+  angle,
+  radius,
+  shoreline,
+}: {
+  angle: number;
+  radius: number;
+  shoreline: Shoreline;
+}) {
+  const distance = radius * 1.22 * shoreFactor(shoreline, angle);
+  const x = Math.cos(angle) * distance;
+  const z = Math.sin(angle) * distance;
+  // Local +Z points straight out to sea.
+  const yaw = Math.PI / 2 - angle;
+  const deckY = WATER_Y + 0.5;
+
+  const posts: [number, number][] = [
+    [-0.42, 0.3],
+    [0.42, 0.3],
+    [-0.42, 1.6],
+    [0.42, 1.6],
+    [-0.42, 2.9],
+    [0.42, 2.9],
+  ];
+
+  return (
+    <group position={[x, deckY, z]} rotation={[0, yaw, 0]}>
+      {/* deck, reaching from the waterline out */}
+      <mesh position={[0, 0, 1.6]} castShadow receiveShadow>
+        <boxGeometry args={[1.05, 0.14, 3.4]} />
+        <meshToonMaterial color={TRUNK} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+
+      {/* ramp up to the sand */}
+      <mesh position={[0, 0.34, -0.58]} rotation={[0.5, 0, 0]} castShadow>
+        <boxGeometry args={[0.92, 0.1, 1.5]} />
+        <meshToonMaterial color={TRUNK} gradientMap={TOON_RAMP} flatShading />
+        <InkOutline />
+      </mesh>
+
+      {posts.map(([px, pz], i) => (
+        <mesh key={`post-${i}`} position={[px, -0.55, pz]} castShadow>
+          <cylinderGeometry args={[0.07, 0.08, 1.4, 6]} />
+          <meshToonMaterial
+            color={TRUNK}
+            gradientMap={TOON_RAMP}
+            flatShading
+          />
+          <InkOutline />
+        </mesh>
+      ))}
+
+      {/* crates waiting to be loaded */}
+      <mesh position={[0.18, 0.24, 2.2]} rotation={[0, 0.45, 0]} castShadow>
+        <boxGeometry args={[0.36, 0.36, 0.36]} />
+        <meshToonMaterial
+          color={SAND_MID}
+          gradientMap={TOON_RAMP}
+          flatShading
+        />
+        <InkOutline />
+      </mesh>
+      <mesh position={[-0.24, 0.19, 1.4]} rotation={[0, 0.2, 0]} castShadow>
+        <boxGeometry args={[0.28, 0.28, 0.28]} />
+        <meshToonMaterial color={SAND} gradientMap={TOON_RAMP} flatShading />
         <InkOutline />
       </mesh>
     </group>
@@ -1127,10 +1788,10 @@ function WorldLabels({ items }: { items: LabelItem[] }) {
 // Sea spray
 // ---------------------------------------------------------------------------
 
-const SPRAY = Array.from({ length: 40 }, () => ({
-  x: (Math.random() - 0.5) * 44,
+const SPRAY = Array.from({ length: 60 }, () => ({
+  x: (Math.random() - 0.5) * 64,
   y: Math.random() * 4 + 0.4,
-  z: (Math.random() - 0.5) * 44,
+  z: (Math.random() - 0.5) * 64,
   speed: 0.3 + Math.random() * 0.5,
   phase: Math.random() * Math.PI * 2,
 }));
@@ -1174,28 +1835,40 @@ function Spray({ count = 40 }: { count?: number }) {
 const MAIN_ISLAND: IslandConfig = {
   x: 0,
   z: 0,
-  radius: 6.4,
-  topY: WATER_Y + 1.85,
+  radius: 8.2,
+  topY: WATER_Y + 1.9,
   seed: 1011,
-  segments: 18,
-  // The avatar ring reaches ~2.9 units from the centre; scatter starts at 3.4.
-  clearRadius: 3.4,
+  segments: 22,
+  // The plaza is ~3.4 units across and the scatter starts outside it.
+  clearRadius: 4.2,
+  plaza: true,
   // Back-left, away from the default camera, so it frames the island without
   // standing between the camera and the avatars.
-  lighthouseAt: [-5.0, -3.1],
-  palms: 6,
-  rocks: 3,
-  bushes: 5,
+  lighthouseAt: [-6.1, -3.8],
+  // Out the front-right, away from the lighthouse.
+  pierAt: 0.49,
+  houses: [
+    { angle: 0.79, dist: 0.66, scale: 1.25, roof: CORAL },
+    { angle: 1.83, dist: 0.7, scale: 1.4, roof: MUSTARD },
+    { angle: 2.62, dist: 0.64, scale: 1.15, roof: TEAL },
+    { angle: 4.36, dist: 0.68, scale: 1.3, roof: CORAL },
+    { angle: 5.5, dist: 0.63, scale: 1.2, roof: MUSTARD },
+  ],
+  palms: 9,
+  rocks: 5,
+  bushes: 8,
 };
 
 const ISLANDS: IslandConfig[] = (() => {
   const rnd = mulberry32(20261107);
   const list: IslandConfig[] = [];
 
-  for (let i = 0; i < 11; i++) {
-    const angle = (i / 11) * Math.PI * 2 + rnd() * 0.55;
-    const distance = 10 + rnd() * 7;
-    const radius = 1.3 + rnd() * 1.8;
+  for (let i = 0; i < 12; i++) {
+    const angle = (i / 12) * Math.PI * 2 + rnd() * 0.55;
+    // Pushed out from the old ring: the main island is now 8.2 units across
+    // and its shoreline reaches past 10.
+    const distance = 21.5 + rnd() * 9;
+    const radius = 1.5 + rnd() * 1.7;
     list.push({
       x: Math.cos(angle) * distance,
       z: Math.sin(angle) * distance,
@@ -1216,8 +1889,8 @@ const ISLANDS: IslandConfig[] = (() => {
 const BUOYS = (() => {
   const rnd = mulberry32(99173);
   return Array.from({ length: 9 }, (_, i) => {
-    const angle = (i / 9) * Math.PI * 2 + 0.4 + rnd() * 0.28;
-    const distance = 7.9 + rnd() * 1.2;
+    const angle = (i / 9) * Math.PI * 2 + 0.95 + rnd() * 0.28;
+    const distance = 11.8 + rnd() * 0.8;
     return {
       position: [
         Math.cos(angle) * distance,
@@ -1228,6 +1901,50 @@ const BUOYS = (() => {
     };
   });
 })();
+
+/**
+ * Boats on slow circular drifts between the main island and the outer islets.
+ * Different radii and speeds mean they never fall into formation; a negative
+ * direction sends one the other way round.
+ */
+const BOATS = [
+  {
+    radius: 14.8,
+    speed: 0.045,
+    phase: 0.4,
+    direction: 1,
+    hull: CORAL,
+    sail: CREAM,
+    scale: 1,
+  },
+  {
+    radius: 15.4,
+    speed: 0.036,
+    phase: 2.6,
+    direction: -1,
+    hull: TEAL,
+    sail: MUSTARD,
+    scale: 1.15,
+  },
+  {
+    radius: 16.0,
+    speed: 0.06,
+    phase: 4.4,
+    direction: 1,
+    hull: MUSTARD,
+    sail: CORAL,
+    scale: 0.9,
+  },
+  {
+    radius: 15.1,
+    speed: 0.03,
+    phase: 5.6,
+    direction: -1,
+    hull: CREAM,
+    sail: TEAL,
+    scale: 1.05,
+  },
+] as const;
 
 // ---------------------------------------------------------------------------
 // Main scene component
@@ -1248,8 +1965,8 @@ export function IslandWorld({
   myColor,
   onAvatarClick,
 }: IslandWorldProps) {
-  // Feet on the sand: the character is modelled from y=0 up.
-  const surfaceY = MAIN_ISLAND.topY + 0.06;
+  // Feet on the plaza: the character is modelled from y=0 up.
+  const surfaceY = MAIN_ISLAND.topY + 0.18;
 
   const remoteUsers = users.filter((u) => u.id !== myId);
   const remoteAvatarPositions = useMemo(() => {
@@ -1258,7 +1975,7 @@ export function IslandWorld({
       const ring = Math.floor(index / perRing);
       const indexInRing = index % perRing;
       const angle = (indexInRing / perRing) * Math.PI * 2 + ring * 0.35;
-      const radius = 2.2 + ring * 0.85;
+      const radius = 2.4 + ring * 0.95;
 
       return [
         MAIN_ISLAND.x + Math.cos(angle) * radius,
@@ -1290,40 +2007,21 @@ export function IslandWorld({
     <div className="relative h-screen w-full">
       <Canvas
         shadows="percentage"
-        camera={{ position: [13, 11, 13], fov: 55 }}
+        camera={{ position: [16, 13, 16], fov: 55 }}
         style={{
-          // Cream paper instead of a sky gradient: the scene sits on the same
-          // surface as the UI rather than floating in a different one.
-          background: `linear-gradient(to bottom, ${CREAM} 0%, #f6ead6 100%)`,
+          // Fallback only: the sky dome covers the canvas from the first frame.
+          // Kept close to the dawn horizon so there is no flash on mount.
+          background: `linear-gradient(to bottom, #ffb37d 0%, #f6ead6 100%)`,
         }}
       >
-        {/* ---- Lighting ---- */}
-        {/* Flat on purpose: toon bands need even fill, and a hot key light
-            reproduces the smooth gradient this art direction removes. */}
-        <ambientLight intensity={0.78} />
-        <directionalLight
-          position={[15, 20, 10]}
-          intensity={0.95}
-          castShadow
-          shadow-mapSize-width={2048}
-          shadow-mapSize-height={2048}
-          shadow-camera-left={-26}
-          shadow-camera-right={26}
-          shadow-camera-top={26}
-          shadow-camera-bottom={-26}
-          shadow-camera-near={0.5}
-          shadow-camera-far={70}
-        />
-
-        {/* ---- Fog, in the page colour so distance fades into the document ---- */}
-        <fog attach="fog" args={[CREAM, 30, 80]} />
+        <DayCycle />
 
         <OrbitControls
           enablePan
           enableZoom
           enableRotate
-          minDistance={7}
-          maxDistance={34}
+          minDistance={9}
+          maxDistance={46}
           maxPolarAngle={Math.PI / 2.1}
           target={[0, 0, 0]}
         />
@@ -1356,7 +2054,11 @@ export function IslandWorld({
           <Buoy key={buoy.seed} position={buoy.position} seed={buoy.seed} />
         ))}
 
-        <Spray count={40} />
+        {BOATS.map((boat, i) => (
+          <Boat key={`boat-${i}`} {...boat} />
+        ))}
+
+        <Spray count={60} />
 
         <WorldLabels items={labelItems} />
       </Canvas>
