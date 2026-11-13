@@ -28,7 +28,7 @@ function check(name, condition) {
 }
 
 async function main() {
-  const { ChatCipher, DecryptionError } = await import(moduleUrl);
+  const { ChatCipher, DecryptionError, SAS_EMOJI } = await import(moduleUrl);
 
   const roomId = "aaa-bbb";
 
@@ -49,7 +49,28 @@ async function main() {
     "safety strings match",
     alice.safetyString.join("") === bob.safetyString.join(""),
   );
-  check("safety string is four emoji", alice.safetyString.length === 4);
+  check("safety string is eight emoji", alice.safetyString.length === 8);
+  check(
+    "every emoji comes from the vocabulary",
+    alice.safetyString.every((word) => SAS_EMOJI.includes(word)),
+  );
+
+  // ── Key confirmation ─────────────────────────────────────────────────
+  const aliceTag = await alice.confirmationTag();
+  const bobTag = await bob.confirmationTag();
+  check("both sides compute the same confirmation tag", aliceTag === bobTag);
+
+  let unconfirmedRejected = false;
+  try {
+    await alice.encrypt("sent before confirmation");
+  } catch {
+    unconfirmedRejected = true;
+  }
+  check("encrypt refuses before confirmation", unconfirmedRejected);
+
+  await alice.verifyConfirmation(bobTag);
+  await bob.verifyConfirmation(aliceTag);
+  check("both sides are confirmed", alice.confirmed && bob.confirmed);
 
   // ── Round trip in both directions ──────────────────────────────────────
   const outbound = await alice.encrypt("hello from alice");
@@ -118,6 +139,19 @@ async function main() {
     "MITM safety strings differ, so comparison catches it",
     alice2.safetyString.join("") !== bob2.safetyString.join(""),
   );
+
+  // Key confirmation is not a MITM defence (a relay holds a valid, matching
+  // secret with each victim). It proves the two ends of *this* session derived
+  // the same secret, so a tag from a different session must not verify.
+  let crossSessionRejected = false;
+  try {
+    await alice2.verifyConfirmation(await bob2.confirmationTag());
+  } catch (error) {
+    crossSessionRejected = error instanceof DecryptionError;
+  }
+  check("confirmation tag from another session is rejected", crossSessionRejected);
+  check("a failed confirmation poisons the cipher", alice2.failed && !alice2.confirmed);
+
 
   console.log(
     `\n${passed} checks passed${failures.length ? `, ${failures.length} failed` : ""}`,

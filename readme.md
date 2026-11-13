@@ -6,6 +6,8 @@
 
 Two browsers, one Durable Object, and a WebRTC DataChannel. The server signs people in, introduces them, and relays the handshake — then gets out of the way. Messages travel browser to browser, so the Worker that connected you cannot read them.
 
+Chat messages are also end-to-end encrypted above the channel: a per-chat ephemeral ECDH exchange, a symmetric ratchet, and an eight-emoji safety string both people compare before the first message. Content is private from the server; *metadata and IP addresses are not* — see [Privacy and encryption](#privacy-and-encryption).
+
 It is deliberately small: a text chat, no accounts, no history, no database. Everything interesting is in the seam between the two halves.
 
 ---
@@ -36,20 +38,21 @@ Every image here is the real app, captured from a running instance — no mockup
 
 1. [What a user sees](#what-a-user-sees)
 2. [Architecture](#architecture)
-3. [Request lifecycle](#request-lifecycle)
-4. [The protocol](#the-protocol)
-5. [Design decisions that carry weight](#design-decisions-that-carry-weight)
-6. [NAT, ICE and TURN](#nat-ice-and-turn)
-7. [Repository layout](#repository-layout)
-8. [The client](#the-client)
-9. [The Worker and its Durable Objects](#the-worker-and-its-durable-objects)
-10. [Cost model](#cost-model)
-11. [Setup from zero](#setup-from-zero)
-12. [Configuration reference](#configuration-reference)
-13. [Verifying a deployment](#verifying-a-deployment)
-14. [Troubleshooting](#troubleshooting)
-15. [Known limits](#known-limits)
-16. [Licence](#licence)
+3. [Privacy and encryption](#privacy-and-encryption)
+4. [Request lifecycle](#request-lifecycle)
+5. [The protocol](#the-protocol)
+6. [Design decisions that carry weight](#design-decisions-that-carry-weight)
+7. [NAT, ICE and TURN](#nat-ice-and-turn)
+8. [Repository layout](#repository-layout)
+9. [The client](#the-client)
+10. [The Worker and its Durable Objects](#the-worker-and-its-durable-objects)
+11. [Cost model](#cost-model)
+12. [Setup from zero](#setup-from-zero)
+13. [Configuration reference](#configuration-reference)
+14. [Verifying a deployment](#verifying-a-deployment)
+15. [Troubleshooting](#troubleshooting)
+16. [Known limits](#known-limits)
+17. [Licence](#licence)
 
 ---
 
@@ -108,6 +111,28 @@ Two consequences of this shape, both deliberate:
 
 - **The DO is a switchboard, not a message bus.** It relays signalling and never chat. If the DataChannel fails, the chat fails — there is no fallback that quietly routes your messages through the server (see [known limits](#known-limits)).
 - **The client never holds a TURN key.** A TURN key mints unlimited credentials, and anything in a Vite bundle is public. So the browser asks, the Worker mints, and the bundle contains a URL and nothing else.
+
+---
+
+## Privacy and encryption
+
+Chat content is encrypted end to end. Everything else about the conversation is not private, and the difference is worth being precise about.
+
+**What is protected**
+
+- **Message contents.** Each chat derives fresh ephemeral ECDH P-256 keys; the signalling relay forwards the public keys but never sees a private key or a message key. HKDF-SHA256 splits the shared secret into two directional chains, and every message advances a symmetric ratchet, so a message key is used once and the chain key that produced it is discarded. AES-256-GCM with the room id as associated data gives confidentiality and integrity, and a replayed or cross-room ciphertext is rejected.
+- **The server never receives plaintext.** Messages travel over the DataChannel, not the WebSocket, and there is no plaintext fallback: if the keys are not ready, nothing is sent.
+- **A tampering relay is detectable.** Both sides derive an eight-emoji safety string from the two public keys (40 bits). Messaging stays locked until the user compares it with the peer and confirms it matches. If the emoji differ, the chat is closed. A relay that substitutes keys cannot make both sides show the same string except by guessing 40 bits in real time.
+- **Key confirmation.** Each side sends an HMAC over the key-exchange transcript, keyed from the shared secret. If the peer cannot produce a matching tag, the session is torn down before the first message instead of failing later on decryption.
+
+**What is not protected**
+
+- **IP addresses.** WebRTC candidates reveal where you are. With a TURN server configured the client sets `iceTransportPolicy: "relay"`, so the peer only ever sees the relay. Without TURN, or with `VITE_ICE_POLICY=all`, a direct connection exposes your public IP — and sometimes your LAN address — to the person you are talking to. That is the largest anonymity gap, and it is a property of peer-to-peer, not of the encryption.
+- **Metadata.** Cloudflare sees which UUIDs connect, who invited whom, the room id, and the timing and size of the signalling exchange. TURN sees the same for relayed sessions. The server does not see message contents or lengths: those go over the DataChannel.
+- **Identity.** There are no accounts: a UUID is generated per page load, so nobody can prove who they were talking to. "Anonymous" here means unaccountable, not untraceable.
+- **Forward secrecy across sessions.** Keys are per chat and discarded on leave. There is no long-term identity key and no ratchet across sessions, so reopening a chat starts over with a new safety string.
+
+The cryptography is hand-rolled on WebCrypto rather than an audited protocol such as Signal's. The construction is deliberately standard (ECDH → HKDF → ratchet → AES-GCM) and covered by [`apps/client/scripts/e2ee-smoke.mjs`](apps/client/scripts/e2ee-smoke.mjs), but it has not had an external review.
 
 ---
 
@@ -182,6 +207,8 @@ Every message is a discriminated union member of `ClientMessage` or `ServerMessa
 | `chat-leave` | — | Release the pairing |
 | `rtc-offer`, `rtc-answer` | `target, payload` | SDP |
 | `rtc-ice-candidate` | `target, payload` | ICE |
+| `e2ee-key` | `target, publicKey, version` | Ephemeral ECDH public key (opaque to the relay) |
+| `e2ee-confirm` | `target, tag` | HMAC proving both sides derived the same secret |
 
 **Server → client**
 
@@ -191,6 +218,7 @@ Every message is a discriminated union member of `ClientMessage` or `ServerMessa
 | `availability-changed` | Someone entered or left a chat |
 | `chat-request`, `chat-response`, `chat-cancelled` | Invitation flow |
 | `rtc-offer`, `rtc-answer`, `rtc-ice-candidate` | Relayed signalling |
+| `e2ee-key`, `e2ee-confirm` | Relayed key exchange and key confirmation |
 | `peer-left` | Your chat partner disconnected |
 | `error` | `busy`, `not-found`, `bad-message`, `too-large`, `not-paired`, `already-paired` |
 
@@ -205,6 +233,8 @@ Each of these is a bug that was found, understood and closed. This is the part o
 **Presence lives in the socket attachment.** A Durable Object can be evicted between messages, and a module-level `Map` would silently lose every user on the island. `ws.serializeAttachment()` survives hibernation, so the world is reconstructed from the sockets themselves.
 
 **Signalling is authorised against server state.** The DO pairs two users on acceptance and relays only between that pair. Without it, anyone who reads the bundle can find the relay and push an SDP offer at a stranger.
+
+**The safety string is the security property, not decoration.** Four emoji out of sixteen was a 16-bit check: a relay that controls both substituted keys could grind a collision offline in milliseconds. It is now eight emoji out of thirty-two — 40 bits — and messaging stays locked until both people compare it and press *they match*. Without that step an active relay terminates two sessions and reads everything while every cryptographic check passes. Key confirmation (an HMAC over the transcript) is a second, separate check: it catches a peer that is not holding the same secret before the first message, but it cannot detect a relay, because a relay legitimately holds a different secret with each side.
 
 **A reconnect can race the old socket's close.** Each page load mints a new UUID, but a reconnect within a session reuses the id. If the old socket is still half-open, the world ends up with two sockets claiming one id: a duplicate avatar, and messages routed to the dead one. On `spawn`, any other socket with that id is closed with code `4001` — and the client treats `4001` as "another tab won", not as a reason to reconnect.
 
@@ -236,6 +266,8 @@ browser ──GET /ice──▶ Worker ──POST credential?secretKey=…──
 
 `/ice` is also the only endpoint that spends money, so it is guarded: an `Origin` allowlist (403 otherwise) in front of a **per-IP rate limit held in a Durable Object** — a counter in the Worker would live in a single isolate, and an attacker hitting different Cloudflare locations would get a fresh allowance in each.
 
+**Privacy and the relay.** ICE candidates include host and server-reflexive addresses, so a direct connection tells the peer where you are. When the configuration contains a TURN server, `lib/ice.ts` sets `iceTransportPolicy: "relay"` and every candidate is a relay address: the peer sees Cloudflare's relay, not you. Without TURN there is nothing to force, so a direct connection is used and the exposure is logged; `VITE_ICE_POLICY=all` opts back into direct connections explicitly.
+
 ---
 
 ## Repository layout
@@ -247,14 +279,17 @@ p2p-chat-app-cloudflare-workers/
 │   │   ├── public/
 │   │   │   ├── _headers             CSP, frame protection, asset caching
 │   │   │   └── sounds/              join, invitation, message
+│   │   ├── scripts/
+│   │   │   └── e2ee-smoke.mjs       crypto checks, run on the real module
 │   │   └── src/
 │   │       ├── App.tsx              the whole client state machine
 │   │       ├── components/
 │   │       │   ├── IslandWorld.tsx  the 3D scene: ocean, islands, avatars
-│   │       │   ├── PrivateChat.tsx  2D chat view
+│   │       │   ├── PrivateChat.tsx  chat overlay + safety verification
 │   │       │   ├── InvitationModal.tsx
 │   │       │   └── WorldBot.tsx
 │   │       └── lib/
+│   │           ├── e2ee.ts          ECDH, ratchet, safety string, confirmation
 │   │           ├── ice.ts           fetches /ice, caches until expiry
 │   │           ├── constants.ts
 │   │           └── utils.ts
@@ -263,7 +298,7 @@ p2p-chat-app-cloudflare-workers/
 │       │   ├── index.ts             router, /ice, CORS, provider selection
 │       │   ├── world.ts             the World Durable Object
 │       │   └── rate-limiter.ts      the IceRateLimiter Durable Object
-│       ├── scripts/smoke.mjs        22 protocol checks against a live DO
+│       ├── scripts/smoke.mjs        25 protocol checks against a live DO
 │       └── wrangler.toml            bindings, migrations, documented vars
 ├── packages/types/src/index.ts      the wire protocol, shared by both ends
 ├── infra/turn/                      coturn in Docker, for local TURN testing
@@ -290,6 +325,8 @@ Identity (id, colour, position) is generated once with `useState(() => …)` rat
 Reconnects use exponential backoff capped at 8 seconds, and the socket is closed on unmount. The client does **not** reconnect after a `4001` close, because that code means another tab took over the identity and reconnecting would start a fight.
 
 `lib/ice.ts` caches the ICE configuration until a minute before its TTL, deduplicates concurrent requests, and falls back to public STUN on any failure.
+
+`lib/e2ee.ts` is the other stateful piece: each chat owns one `ChatCipher`, which generates an ephemeral P-256 key, waits for the peer's key (including when it arrives before key generation has settled), derives two directional chains, and is discarded when the chat ends. The chat overlay keeps the composer locked until the confirmation HMAC verifies and the user has compared the eight emoji.
 
 The 3D scene is cheap on purpose: one instanced mesh for the particles, flat shading everywhere, and per-vertex wave animation on a single 80×80 ocean plane. It still ships a 1.2 MB bundle, because three.js is three.js.
 
@@ -375,6 +412,7 @@ pnpm exec wrangler pages deploy apps/client/dist
 | Variable | Default | Notes |
 |---|---|---|
 | `VITE_WORLD_WSS_URL` | `http://localhost:8787` | Worker origin. The browser upgrades `http(s)` to `ws(s)`. |
+| `VITE_ICE_POLICY` | `relay` | `relay` hides your IP behind TURN when one is configured; `all` allows direct connections and exposes it. |
 
 **Worker** — `[vars]` in `wrangler.toml`, or `wrangler secret put`
 
@@ -412,7 +450,7 @@ WORLD_URL=wss://p2p-chat-server.kusalkalingainfo.workers.dev \
   node apps/server/scripts/smoke.mjs
 ```
 
-22 checks: presence, the invitation handshake, relay authorisation, unknown-message rejection, pairing release, and the reconnect/ghost-socket path. Locally, `pnpm --filter server smoke` against `pnpm --filter server dev`.
+25 checks: presence, the invitation handshake, relay authorisation, unknown-message rejection, pairing release, and the reconnect/ghost-socket path. Locally, `pnpm --filter server smoke` against `pnpm --filter server dev`.
 
 **3. Two devices, one on mobile data.** The only test that exercises the relay. Wi-Fi to Wi-Fi connects with or without TURN and proves nothing: laptop on Wi-Fi, phone on a carrier network, invite each other. It should connect, and it should be measurably slower than the direct case.
 
@@ -437,12 +475,13 @@ WORLD_URL=wss://p2p-chat-server.kusalkalingainfo.workers.dev \
 ## Known limits
 
 - **No fallback when P2P fails.** If the DataChannel cannot open, messages do not flow; there is no server-side relay for chat content. That is a deliberate property — the server cannot read your messages because it never has them — but it means a hostile network needs TURN, not a cleverer client.
+- **The network can see where you are.** Chat content is encrypted, but a direct connection exposes your IP to the peer, and Cloudflare and TURN see the signalling metadata. With TURN configured the client forces relay-only candidates so the peer sees the relay; `VITE_ICE_POLICY=all` gives that up. This is not an anonymity network.
 - **Relay-to-relay is unverified locally.** With coturn in Docker and both peers on one machine, the only available peer address is the TURN server's own, which coturn refuses as loop protection. Allocation is verified; a full media path through the relay needs two networks.
 - **Positions are cosmetic.** The server stores `x/y/z`, but avatars are laid out on a ring by index. No movement, no collision, no persistence.
-- **No accounts.** Identity is a UUID in memory: a reload is a new user, and anyone can claim any world name.
+- **No accounts.** Identity is a UUID in memory: a reload is a new user, and anyone can claim any world name. That makes the app unaccountable, not untraceable.
 - **No history.** Messages live only in the two browsers and vanish when either leaves.
 - **One Durable Object per world.** Fine for dozens of users; a single DO is a single point of serialisation and would not hold a crowd.
-- **No unit tests.** The protocol has 22 integration checks against a real DO; the React client has none.
+- **Tests cover the protocol and the crypto, not the UI.** `e2ee-smoke.mjs` exercises key agreement, confirmation, tampering and replay against the real module, and the DO smoke test covers signalling; the React components have no tests.
 
 ---
 

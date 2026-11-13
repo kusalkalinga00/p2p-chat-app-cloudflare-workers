@@ -41,20 +41,35 @@
  *   does not expose earlier messages.
  * - AES-256-GCM, with the room id as associated data so a ciphertext cannot
  *   be replayed into a different conversation.
+ * - A key confirmation tag (HMAC over both public keys) in each direction, so
+ *   a peer that is not holding the same shared secret is detected before the
+ *   first message, not after it fails to decrypt.
+ * - A 40-bit safety string: eight emoji from a 32-entry alphabet. The earlier
+ *   four-of-sixteen version was only 16 bits, which a hostile relay could
+ *   grind through until both sides showed the same emoji. 2^40 is out of
+ *   reach for an interactive attack.
  */
 
 const ECDH = { name: "ECDH", namedCurve: "P-256" } as const;
 const AES = { name: "AES-GCM", length: 256 } as const;
 
 /** Bump when the derivation changes; mixed versions must fail loudly. */
-const PROTOCOL = "island-chat/e2ee/v1";
+const PROTOCOL = "island-chat/e2ee/v2";
+
+/**
+ * Version advertised on the wire so a peer running different derivation code
+ * is rejected with a clear message instead of silently deriving other keys.
+ */
+export const E2EE_VERSION = 2;
 
 /** How far ahead of the expected counter a message may jump. */
 const MAX_SKIP = 256;
 
 /**
- * Fixed emoji vocabulary for the safety string. Sixteen entries so each word
- * can be selected by four bits of the digest.
+ * Fixed emoji vocabulary for the safety string. Thirty-two entries so each
+ * word can be selected by five bits of the digest, and eight words give a
+ * 40-bit check. Sixteen entries (four bits) was too small: a relay that
+ * controls both substituted keys could grind a colliding pair offline.
  */
 export const SAS_EMOJI = [
   "🐳",
@@ -73,9 +88,31 @@ export const SAS_EMOJI = [
   "🧭",
   "🐡",
   "🦑",
+  "🐬",
+  "🐢",
+  "🦞",
+  "🐟",
+  "🦐",
+  "🐋",
+  "🏝️",
+  "🌅",
+  "🌙",
+  "☀️",
+  "🌟",
+  "⚓",
+  "🚢",
+  "🐧",
+  "🦦",
+  "🐊",
 ] as const;
 
-/** Four emoji, shown on both sides, compared by the two people. */
+/** Bits of the digest each emoji consumes. log2(SAS_EMOJI.length). */
+const SAS_BITS = 5;
+
+/** Eight words × five bits = a 40-bit safety string. */
+export const SAS_LENGTH = 8;
+
+/** Eight emoji, shown on both sides, compared by the two people. */
 export type SafetyString = readonly string[];
 
 export interface EncryptedPayload {
@@ -151,6 +188,30 @@ function nonceFor(n: number): Uint8Array {
   return nonce;
 }
 
+/** Reads `count` bits at a bit offset, most-significant bit first. */
+function readBits(bytes: Uint8Array, offset: number, count: number): number {
+  let value = 0;
+  for (let i = 0; i < count; i += 1) {
+    const bit = (bytes[(offset + i) >> 3] >> (7 - ((offset + i) & 7))) & 1;
+    value = (value << 1) | bit;
+  }
+  return value;
+}
+
+/**
+ * Compares two byte arrays without an early exit.
+ *
+ * The confirmation tag is compared against a value an attacker would have to
+ * guess; a length-dependent early return leaks how much of the guess was
+ * right, which is exactly the one bit useful to them.
+ */
+function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let difference = 0;
+  for (let i = 0; i < a.length; i += 1) difference |= a[i] ^ b[i];
+  return difference === 0;
+}
+
 /**
  * One side of one chat's encryption.
  *
@@ -162,12 +223,29 @@ export class ChatCipher {
   private privateKey: CryptoKey | null = null;
   private publicKeyB64: string | null = null;
 
+  /**
+   * Key generation is async, and the peer's key can arrive before it settles.
+   * Caching the promise makes `init()` idempotent and lets `derive()` wait for
+   * it instead of throwing away an otherwise valid key exchange.
+   */
+  private initPromise: Promise<string> | null = null;
+
+  /** Same idea for derivation: a duplicate key message must not re-derive. */
+  private derivePromise: Promise<void> | null = null;
+
   private sendChain: Uint8Array | null = null;
   private receiveChain: Uint8Array | null = null;
   private sendCounter = 0;
   private receiveCounter = 0;
 
+  /** Keyed HMAC used to prove both sides derived the same secret. */
+  private confirmKey: CryptoKey | null = null;
+  /** The exact bytes the safety string and confirmation are bound to. */
+  private transcript: string | null = null;
+
   private safety: SafetyString | null = null;
+  private confirmedState = false;
+  private failedState = false;
 
   private readonly roomId: string;
   private readonly role: E2eeRole;
@@ -179,15 +257,20 @@ export class ChatCipher {
 
   /** Generates this side's ephemeral key pair and returns the public half. */
   async init(): Promise<string> {
-    const pair = (await crypto.subtle.generateKey(ECDH, true, [
-      "deriveBits",
-    ])) as CryptoKeyPair;
+    if (!this.initPromise) {
+      this.initPromise = (async () => {
+        const pair = (await crypto.subtle.generateKey(ECDH, true, [
+          "deriveBits",
+        ])) as CryptoKeyPair;
 
-    this.privateKey = pair.privateKey;
-    this.publicKeyB64 = toBase64(
-      await crypto.subtle.exportKey("spki", pair.publicKey),
-    );
-    return this.publicKeyB64;
+        this.privateKey = pair.privateKey;
+        this.publicKeyB64 = toBase64(
+          await crypto.subtle.exportKey("spki", pair.publicKey),
+        );
+        return this.publicKeyB64;
+      })();
+    }
+    return this.initPromise;
   }
 
   get publicKey(): string {
@@ -198,6 +281,19 @@ export class ChatCipher {
   /** True once both keys have been exchanged and chains are ready. */
   get ready(): boolean {
     return this.sendChain !== null && this.receiveChain !== null;
+  }
+
+  /**
+   * True once the peer's confirmation tag verified. Messages must not be sent
+   * before this: it is the proof that both ends hold the same secret.
+   */
+  get confirmed(): boolean {
+    return this.confirmedState;
+  }
+
+  /** True if confirmation failed; this cipher must never be used again. */
+  get failed(): boolean {
+    return this.failedState;
   }
 
   /** The safety string, or null until `derive` has run. */
@@ -211,10 +307,21 @@ export class ChatCipher {
    * The direction names are the *roles*, not the sides, so both ends derive
    * the same pair of chains without needing to agree on anything else: what
    * the initiator calls "send" the responder calls "receive".
+   *
+   * Safe to call before `init()` has settled: it awaits key generation rather
+   * than dropping the peer's key. Idempotent, so a repeated key message is
+   * harmless.
    */
   async derive(peerPublicKeyB64: string): Promise<void> {
+    if (!this.derivePromise) {
+      this.derivePromise = this.deriveOnce(peerPublicKeyB64);
+    }
+    return this.derivePromise;
+  }
+
+  private async deriveOnce(peerPublicKeyB64: string): Promise<void> {
+    await this.init();
     if (!this.privateKey) throw new Error("call init() first");
-    if (this.ready) return; // idempotent: a duplicate key message is harmless
 
     let peerKey: CryptoKey;
     try {
@@ -247,16 +354,73 @@ export class ChatCipher {
     this.sendChain = await hkdf(root, sendInfo);
     this.receiveChain = await hkdf(root, receiveInfo);
 
+    // A separate key proves key agreement without being usable to encrypt
+    // messages, so the confirmation can never leak a message key.
+    this.confirmKey = await crypto.subtle.importKey(
+      "raw",
+      await hkdf(root, "confirm"),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+
     // Safety string: bind both public keys *in sorted order*, so each side
     // computes the same value regardless of who sent first. A relay that
     // swaps either key produces a different set of emoji on each side.
     const keys = [this.publicKeyB64, peerPublicKeyB64].sort().join("|");
-    const digest = await sha256(
-      utf8(`${PROTOCOL}/sas|${this.roomId}|${keys}`),
+    this.transcript = `${PROTOCOL}/sas|${this.roomId}|${keys}`;
+
+    const digest = await sha256(utf8(this.transcript));
+    this.safety = Array.from(
+      { length: SAS_LENGTH },
+      (_, i) => SAS_EMOJI[readBits(digest, i * SAS_BITS, SAS_BITS)],
     );
-    this.safety = [0, 1, 2, 3].map(
-      (i) => SAS_EMOJI[digest[i] % SAS_EMOJI.length],
+  }
+
+  /**
+   * This side's confirmation tag: an HMAC over the same transcript the safety
+   * string covers. The peer verifies it with the key derived from the shared
+   * secret, so a relay that substituted keys cannot produce a matching tag.
+   */
+  async confirmationTag(): Promise<string> {
+    if (!this.confirmKey || !this.transcript) {
+      throw new Error("not derived yet");
+    }
+    const tag = await crypto.subtle.sign(
+      "HMAC",
+      this.confirmKey,
+      utf8(this.transcript),
     );
+    return toBase64(tag);
+  }
+
+  /**
+   * Verifies the peer's confirmation tag.
+   *
+   * Awaits an in-flight `derive()` rather than reading half-built state: the
+   * tag is sent over the signalling socket *after* the peer's key, but this
+   * side handles that key asynchronously, so the two can overlap.
+   */
+  async verifyConfirmation(tag: string): Promise<void> {
+    if (!this.derivePromise) {
+      throw new DecryptionError("Confirmation arrived before the key exchange");
+    }
+    await this.derivePromise;
+
+    let received: Uint8Array;
+    try {
+      received = fromBase64(tag);
+    } catch {
+      this.failedState = true;
+      throw new DecryptionError("Malformed key confirmation");
+    }
+
+    const expected = fromBase64(await this.confirmationTag());
+    if (!timingSafeEqual(expected, received)) {
+      this.failedState = true;
+      throw new DecryptionError("Key confirmation failed");
+    }
+    this.confirmedState = true;
   }
 
   /** Advances a chain one step, returning the message key and the new chain. */
@@ -274,6 +438,9 @@ export class ChatCipher {
 
   async encrypt(plaintext: string): Promise<EncryptedPayload> {
     if (!this.sendChain) throw new Error("not derived yet");
+    // Fail closed: a session whose confirmation has not verified could be
+    // talking to a relay that does not hold the same secret.
+    if (!this.confirmed) throw new Error("key confirmation is not complete");
 
     const { messageKey, nextChain } = await this.step(this.sendChain);
     const n = this.sendCounter;

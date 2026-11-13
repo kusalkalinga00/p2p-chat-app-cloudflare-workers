@@ -15,12 +15,48 @@ const FALLBACK_ICE_SERVERS: IceServer[] = [
 const DEFAULT_TTL_SECONDS = 300;
 const FALLBACK_TTL_SECONDS = 30;
 
+/**
+ * Privacy switch: with a TURN server available, use *only* relay candidates.
+ *
+ * A direct P2P connection tells the peer your address: the ICE candidates we
+ * send include host and server-reflexive addresses, so the person on the
+ * other end can read your public IP (and, outside mDNS, your LAN address).
+ * Routing through TURN hides both behind the relay, at the cost of bandwidth.
+ *
+ * Set `VITE_ICE_POLICY=all` to allow direct connections. If no TURN server is
+ * configured there is no relay to force, so direct is used and the exposure is
+ * logged rather than silently pretended away.
+ */
+const PREFER_RELAY =
+  (import.meta.env.VITE_ICE_POLICY ?? "relay").toLowerCase() !== "all";
+
+let warnedNoRelay = false;
+
+function hasTurnServer(iceServers: IceServer[]): boolean {
+  return iceServers.some((server) => {
+    const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+    return urls.some((url) => /^turns?:/i.test(url));
+  });
+}
+
 let cache: { expiresAt: number; config: RTCConfiguration } | null = null;
 /** Deduplicates concurrent callers, e.g. both peers opening a chat at once. */
 let inFlight: Promise<RTCConfiguration> | null = null;
 
 function toConfiguration(iceServers: IceServer[], ttlSeconds: number) {
-  const config: RTCConfiguration = { iceServers };
+  const relayOnly = PREFER_RELAY && hasTurnServer(iceServers);
+
+  if (!relayOnly && PREFER_RELAY && !warnedNoRelay) {
+    warnedNoRelay = true;
+    console.warn(
+      "[ice] no TURN relay configured: peers will see each other's IP address",
+    );
+  }
+
+  const config: RTCConfiguration = relayOnly
+    ? { iceServers, iceTransportPolicy: "relay" }
+    : { iceServers };
+
   const lifetime = Math.max(ttlSeconds - 60, FALLBACK_TTL_SECONDS);
 
   return {
