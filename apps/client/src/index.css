@@ -29,6 +29,22 @@
   body,
   #root {
     height: 100%;
+    /* A phone keyboard must never pan the whole app; the shell is resized
+       from the visual viewport instead. */
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  html {
+    /* Safari must not rescale text when the device rotates. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  /* Fallback for the first paint and for browsers without visualViewport;
+     lib/viewport.ts overrides it in pixels once it has measured. */
+  :root {
+    --app-height: 100dvh;
   }
 
   body {
@@ -50,6 +66,18 @@
 }
 
 @layer components {
+  /* Full-screen shell sized from the visual viewport rather than `dvh`, so a
+     phone keyboard shrinks the app instead of covering the composer.
+     lib/viewport.ts keeps --app-height and --app-top in sync. */
+  .app-shell {
+    position: fixed;
+    top: var(--app-top, 0px);
+    right: 0;
+    left: 0;
+    height: var(--app-height);
+    overflow: hidden;
+  }
+
   /* A pill of cream paper with a fat ink outline and a hard shadow. */
   .sticker {
     display: inline-flex;
@@ -120,6 +148,17 @@
 
   .buoy-input::placeholder {
     color: rgb(23 19 16 / 0.6);
+  }
+
+  /* Composer padding that clears the home indicator — but not while the
+     keyboard is up, when the indicator is off-screen anyway. lib/viewport.ts
+     toggles the data-keyboard flag. */
+  .composer {
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.625rem);
+  }
+
+  html[data-keyboard] .composer {
+    padding-bottom: 0.625rem;
   }
 
   /* Focus ring for keyboard users, suppressed for pointer clicks. */
