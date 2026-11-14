@@ -111,8 +111,8 @@ export function PrivateChat({
   const badge = statusConfig[rtcStatus];
 
   return (
-    <div className="pointer-events-none fixed inset-0 z-40 flex items-end justify-start md:p-6">
-      <div className="pointer-events-auto flex h-dvh w-full flex-col overflow-hidden bg-cream md:h-[520px] md:max-h-[calc(100dvh-3rem)] md:w-[392px] md:rounded-[22px] md:border-2 md:border-ink md:shadow-[6px_6px_0_var(--color-ink)]">
+    <div className="app-shell pointer-events-none z-40 flex items-end justify-start md:p-6">
+      <div className="pointer-events-auto flex h-full w-full flex-col overflow-hidden bg-cream md:h-[520px] md:max-h-[calc(100dvh-3rem)] md:w-[392px] md:rounded-[22px] md:border-2 md:border-ink md:shadow-[6px_6px_0_var(--color-ink)]">
         {/* ── Header ── */}
         <header className="flex items-center justify-between gap-3 border-b-2 border-ink bg-mustard px-4 py-3">
           <div className="min-w-0">
@@ -215,10 +215,7 @@ export function PrivateChat({
         {/* ── Composer ── */}
         <form
           onSubmit={handleSubmit}
-          className="flex items-center gap-2 border-t-2 border-ink bg-white px-2.5 pt-2.5"
-          style={{
-            paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 0.625rem)",
-          }}
+          className="composer flex items-center gap-2 border-t-2 border-ink bg-white px-2.5 pt-2.5"
         >
           <input
             type="text"
@@ -226,7 +223,9 @@ export function PrivateChat({
             onChange={(e) => setDraft(e.target.value)}
             placeholder={placeholder}
             disabled={!canSend}
-            className="buoy-input min-w-0 flex-1 px-3.5 py-2.5 text-sm font-medium"
+            /* 16px minimum: iOS zooms the page for anything smaller when a
+               field takes focus, and that zoom is what wrecked the layout. */
+            className="buoy-input min-w-0 flex-1 px-3.5 py-2.5 text-base font-medium"
           />
           <button
             type="submit"

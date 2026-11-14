@@ -293,7 +293,8 @@ p2p-chat-app-cloudflare-workers/
 │   │           ├── e2ee.ts          ECDH, ratchet, key confirmation
 │   │           ├── ice.ts           fetches /ice, caches until expiry
 │   │           ├── constants.ts
-│   │           └── utils.ts
+│   │           ├── utils.ts
+│   │           └── viewport.ts      iOS keyboard-aware app height
 │   └── server/                      Cloudflare Worker
 │       ├── src/
 │       │   ├── index.ts             router, /ice, CORS, provider selection
@@ -328,6 +329,8 @@ Reconnects use exponential backoff capped at 8 seconds, and the socket is closed
 `lib/ice.ts` caches the ICE configuration until a minute before its TTL, deduplicates concurrent requests, and falls back to public STUN on any failure.
 
 `lib/e2ee.ts` is the other stateful piece: each chat owns one `ChatCipher`, which generates an ephemeral P-256 key, waits for the peer's key (including when it arrives before key generation has settled), derives two directional chains, and is discarded when the chat ends. The chat overlay keeps the composer locked until the confirmation HMAC verifies.
+
+`lib/viewport.ts` handles the phone keyboard. `dvh` units and `position: fixed` measure the *layout* viewport, which does not shrink when the iOS keyboard slides up, so it mirrors `visualViewport` into `--app-height` and `--app-top` and the shell and chat overlay size themselves from those. The composer's field is 16px for the same platform reason: iOS zooms the page when a smaller font takes focus, which throws the whole layout off.
 
 The 3D scene is cheap on purpose: one instanced mesh for the particles, flat shading everywhere, and per-vertex wave animation on a single 80×80 ocean plane. It still ships a 1.2 MB bundle, because three.js is three.js.
 

@@ -912,7 +912,7 @@ function App() {
 
   if (!connected && view === "world") {
     return (
-      <div className="min-h-dvh bg-cream flex flex-col items-center justify-center p-6">
+      <div className="app-shell flex flex-col items-center justify-center overflow-y-auto bg-cream p-6">
         <div className="buoy-card w-full max-w-md p-8 text-center">
           <h1 className="text-3xl font-black tracking-tight">Island Chat</h1>
           <p className="mt-1.5 text-sm font-medium text-ink/70">
@@ -969,7 +969,7 @@ function App() {
   const isChatting = view === "chat" && chatTarget !== null;
 
   return (
-    <div className="relative h-dvh w-full overflow-hidden bg-cream">
+    <div className="app-shell bg-cream">
       {/* 3D World */}
       <IslandWorld
         users={users}
