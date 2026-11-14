@@ -13,14 +13,14 @@
   },
   "dependencies": {
     "@p2p-chat/types": "workspace:*",
-    "@react-three/drei": "10.7.7",
+    "@react-three/drei": "10.7.9",
     "@react-three/fiber": "^9.8.2",
-    "@tailwindcss/vite": "^4.3.4",
-    "lucide-react": "^0.563.0",
+    "@tailwindcss/vite": "^4.3.5",
+    "lucide-react": "^1.72.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "tailwindcss": "^4.3.4",
-    "three": "^0.182.0"
+    "tailwindcss": "^4.3.5",
+    "three": "^0.187.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
