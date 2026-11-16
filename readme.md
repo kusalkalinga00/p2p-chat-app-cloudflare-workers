@@ -2,7 +2,7 @@
 
 **A personal project, built to learn Cloudflare Workers by doing the thing they are least obviously for:** a live 3D world where two strangers can open a private chat that never passes through your server.
 
-[![The island world: a sand island with palms and a lighthouse, two connected users](/readme_assets/world.png)](/readme_assets/world.png)
+[![The island town: winding roads and bright-roofed houses around a plaza, a lighthouse on the ridge, two players on the island](/readme_assets/world.png)](/readme_assets/world.png)
 
 Two browsers, one Durable Object, and a WebRTC DataChannel. The server signs people in, introduces them, and relays the handshake — then gets out of the way. Messages travel browser to browser, so the Worker that connected you cannot read them.
 
@@ -16,7 +16,7 @@ It is deliberately small: a text chat, no accounts, no history, no database. Eve
 
 One loop, no menus:
 
-- **Join the island.** You appear as a sphere on a floating island with a colour and an ID. Orbit the scene; see who else is here.
+- **Join the island.** You appear as a small character in a town square with a colour and an ID, and wander the plaza. Orbit the scene; see who else is here.
 - **Click someone.** A dialog asks whether to invite them. If they are already in a chat you are told immediately — their avatar carries a red dot instead of a green one.
 - **They accept.** Both browsers negotiate a DataChannel through the Durable Object, then talk directly. The header reads `P2P Connected` only once the channel is actually open.
 - **Either side leaves.** The pairing is released server-side, both users become available again, and the peer is told rather than left staring at a dead channel.
@@ -29,7 +29,7 @@ A world bot explains the one interaction, and three sound effects mark arrivals,
 
 Every image here is the real app, captured from a running instance — no mockups.
 
-| [![The world with two users connected](/readme_assets/world.png)](/readme_assets/world.png) **The world.** Who is present top-left, connection state top-right, characters standing on the island among the palms — with a lighthouse to steer by. | [![An incoming chat request dialog](/readme_assets/invite-request.png)](/readme_assets/invite-request.png) **An invitation.** A modal over the blurred island; the sender waits with a 15-second timeout. |
+| [![An incoming chat request](/readme_assets/invite-request.png)](/readme_assets/invite-request.png) **An invitation.** A request over the blurred island town; the sender is identified and waits with a 15-second timeout. | [![A private chat between two users](/readme_assets/chat.png)](/readme_assets/chat.png) **The private chat.** Peer id and channel state in the header, the lock row once the key confirmation lands, and messages going browser to browser. |
 |---|---|
 
 ---
